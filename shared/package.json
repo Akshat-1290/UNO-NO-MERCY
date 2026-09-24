@@ -1,0 +1,9 @@
+{
+  "name": "@uno/shared",
+  "version": "1.0.0",
+  "private": true,
+  "exports": {
+    "./types": "./src/types.ts",
+    "./unoDeck": "./src/unoDeck.ts"
+  }
+}

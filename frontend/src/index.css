@@ -1,0 +1,191 @@
+@import "tailwindcss";
+
+/* Web App & Accessibility Optimization */
+html, body {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  overscroll-behavior-y: none;
+}
+
+/* Ensure focus-visible is distinct for keyboard navigation accessibility */
+:focus-visible {
+  outline: 2px solid #f59e0b;
+  outline-offset: 2px;
+}
+
+/* Prevent accidental text selection or callouts on rapid card tapping */
+button, [role="button"] {
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+
+/* Hardware accelerated transitions for fluid frame rate */
+.gpu-layer {
+  transform: translate3d(0, 0, 0);
+  will-change: transform;
+}
+
+/* Sleek ultra-thin minimal custom scrollbars */
+::-webkit-scrollbar {
+  width: 2.5px;
+  height: 2.5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 9999px;
+  transition: background 0.2s ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(245, 158, 11, 0.75);
+}
+
+/* Mobile GPU and Layering Guardrails */
+@media (max-width: 768px), (pointer: coarse) {
+  /* GPU Layering for active cards & drawers */
+  .gpu-layer {
+    transform: translate3d(0, 0, 0);
+    will-change: transform;
+    backface-visibility: hidden;
+  }
+}
+
+/* Firefox scrollbar styling */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+}
+
+/* Sleek minimal custom scrollbar utility for card trays & headers */
+.scrollbar-minimal::-webkit-scrollbar {
+  width: 2px;
+  height: 2px;
+}
+
+.scrollbar-minimal::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scrollbar-minimal::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 9999px;
+  transition: background 0.2s ease;
+}
+
+.scrollbar-minimal::-webkit-scrollbar-thumb:hover {
+  background: rgba(245, 158, 11, 0.7);
+}
+
+.scrollbar-minimal {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+/* Hidden scrollbar only when explicitly requested */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* ==========================================================================
+   UNO SHOW 'EM NO MERCY — HIGH-OCTANE FIGHT-GAME DESIGN SYSTEM
+   ========================================================================== */
+
+/* Typography */
+.font-display {
+  font-family: 'Barlow Condensed', 'Bebas Neue', 'Impact', sans-serif;
+  letter-spacing: 0.025em;
+}
+
+.font-mono-hud {
+  font-family: 'JetBrains Mono', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Dark Ash / Asphalt Texture with Thin Glowing Red/Orange Crack Lines (No soft gradient blobs) */
+.bg-ash-asphalt {
+  background-color: #09080a;
+  background-image: 
+    /* Subtle asphalt grit lighting */
+    radial-gradient(circle at 50% 100%, rgba(255, 38, 0, 0.06) 0%, transparent 75%),
+    /* Crisp repeating SVG crack fissures */
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='280' height='280' viewBox='0 0 280 280'%3E%3Cpath d='M25,0 L40,50 L18,95 L65,122 L45,180 L102,202 L118,280 M18,95 L-8,128 M65,122 L130,112 L178,160 L156,225 L215,280 M130,112 L188,75 L248,92 L280,65 M188,75 L204,16 L262,0 M178,160 L236,176 L280,224' fill='none' stroke='%23ff2600' stroke-width='0.8' stroke-opacity='0.24' stroke-linejoin='round'/%3E%3Cpath d='M40,50 L78,34 L124,60 M156,225 L128,258' fill='none' stroke='%23ff7a00' stroke-width='0.55' stroke-opacity='0.18' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: auto, 280px 280px;
+}
+
+/* Fight-Game Diagonal Screen Slices and Jagged/Chamfered Clip-Paths */
+.clip-chamfer {
+  clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px));
+}
+
+.clip-chamfer-lg {
+  clip-path: polygon(0 0, calc(100% - 22px) 0, 100% 22px, 100% 100%, 22px 100%, 0 calc(100% - 22px));
+}
+
+.clip-chamfer-btn {
+  clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+}
+
+.clip-slash-tag {
+  clip-path: polygon(10px 0, 100% 0, calc(100% - 10px) 100%, 0 100%);
+}
+
+.clip-diagonal-vs {
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 28px), 0 100%);
+}
+
+/* Fighting-Game Stamped CTA Button with Fast Tactical Slam-Down Effect (<180ms) */
+.btn-stamp-slam {
+  transform: rotate(-1.5deg);
+  box-shadow: 4px 4px 0px #000000, 4px 4px 0px 1.5px #ff2600;
+  transition: transform 120ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 120ms cubic-bezier(0.16, 1, 0.3, 1), filter 120ms ease;
+  will-change: transform, box-shadow;
+}
+
+.btn-stamp-slam:hover {
+  transform: rotate(-0.5deg) translate(-1px, -1px);
+  box-shadow: 6px 6px 0px #000000, 6px 6px 0px 2px #ff4500;
+}
+
+.btn-stamp-slam:active {
+  transform: rotate(0deg) translate(3px, 3px) scale(0.985);
+  box-shadow: 1px 1px 0px #000000, 1px 1px 0px 1px #ff2600;
+}
+
+/* Industrial Hard Shadow for Secondary Interactive Elements */
+.btn-stamp-secondary {
+  box-shadow: 3px 3px 0px #000000, 3px 3px 0px 1px rgba(255, 255, 255, 0.12);
+  transition: transform 100ms ease, box-shadow 100ms ease;
+}
+
+.btn-stamp-secondary:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0px #000000, 4px 4px 0px 1px rgba(255, 255, 255, 0.28);
+}
+
+.btn-stamp-secondary:active {
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0px #000000;
+}
+
+/* Motion Budget & Accessibility Guardrail */
+@media (prefers-reduced-motion: reduce) {
+  .btn-stamp-slam,
+  .btn-stamp-secondary {
+    transform: none !important;
+    transition: none !important;
+  }
+}
+
