@@ -1,5 +1,5 @@
 import React, { useCallback } from 'react';
-import { Card } from '../../../shared/src/types';
+import { Card } from '@uno/shared/types';
 import { UnoCard } from './UnoCard';
 
 interface HandCardItemProps {
@@ -8,6 +8,7 @@ interface HandCardItemProps {
   isPlayable: boolean;
   isJumpInPlayable: boolean;
   isNewlyDrawn?: boolean;
+  isDealingHidden?: boolean;
   size?: 'sm' | 'md' | 'lg' | 'xl';
   onCardClick: (card: Card) => void;
 }
@@ -18,6 +19,7 @@ export const HandCardItem: React.FC<HandCardItemProps> = React.memo(({
   isPlayable,
   isJumpInPlayable,
   isNewlyDrawn = false,
+  isDealingHidden = false,
   size = 'md',
   onCardClick,
 }) => {
@@ -32,14 +34,17 @@ export const HandCardItem: React.FC<HandCardItemProps> = React.memo(({
 
   return (
     <div
-      className={`flex-shrink-0 relative transition-all duration-150 ease-out ${
-        isPopped
-          ? '-translate-y-2.5 sm:-translate-y-3.5 scale-[1.03]'
-          : 'opacity-80 hover:opacity-100'
+      data-hand-card-id={card.id}
+      className={`flex-shrink-0 relative ${
+        isDealingHidden
+          ? 'opacity-0 pointer-events-none transition-none'
+          : 'opacity-100 transition-transform duration-150 ease-out'
+      } ${
+        isPopped ? '-translate-y-2.5 sm:-translate-y-3.5 scale-[1.03]' : ''
       } hover:!z-[999] focus-within:!z-[999] hover:-translate-y-3.5 sm:hover:-translate-y-4 hover:scale-[1.06]`}
       style={{
         zIndex: baseZ,
-        willChange: 'transform',
+        willChange: 'transform, opacity',
       }}
     >
       <UnoCard

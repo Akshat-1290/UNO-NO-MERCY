@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+
+Sitemap: https://uno-no-mercy-iota.vercel.app/sitemap.xml

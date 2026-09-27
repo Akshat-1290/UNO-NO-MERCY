@@ -20,7 +20,13 @@ export interface PerfMetrics {
   };
 }
 
+export const IS_PERF_TRACKER_ENABLED: boolean =
+  String((import.meta as any).env?.VITE_ENABLE_PERF_TRACKER ?? 'false')
+    .trim()
+    .toLowerCase() === 'true';
+
 class PerformanceEngine {
+  public readonly isEnabled = IS_PERF_TRACKER_ENABLED;
   private isRunning = false;
   private animFrameId: number | null = null;
   private pingIntervalId: number | null = null;
@@ -38,11 +44,15 @@ class PerformanceEngine {
   private currentJitter = 0;
   private isTabVisible = true;
   private isInGame = false;
+  private isHudVisible = true;
+  private isHudExpanded = false;
 
   private wsSendCallback: ((msg: any) => void) | null = null;
   private listeners = new Set<(metrics: PerfMetrics) => void>();
 
   constructor() {
+    if (!this.isEnabled) return;
+
     this.fpsSamples = Array(15).fill(60);
     this.pingSamples = Array(15).fill(0);
 
@@ -54,38 +64,79 @@ class PerformanceEngine {
         this.isTabVisible = document.visibilityState === 'visible';
         this.lastFrameTime = performance.now();
         this.lastFpsUpdateTime = performance.now();
+        this.syncEngineState();
       });
     }
 
-    // Auto-start lightweight engine
-    this.start();
+    this.syncEngineState();
   }
 
   public setInGame(inGame: boolean) {
+    if (!this.isEnabled) return;
+    if (this.isInGame === inGame) return;
     this.isInGame = inGame;
     if (inGame) {
       this.resetStats();
+      this.sendPing();
+    }
+    this.syncEngineState();
+  }
+
+  public setHudState(visible: boolean, expanded: boolean = false) {
+    if (!this.isEnabled) return;
+    const changed = this.isHudVisible !== visible || this.isHudExpanded !== expanded;
+    this.isHudVisible = visible;
+    this.isHudExpanded = expanded;
+    if (changed) {
+      this.syncEngineState();
+      if (visible && expanded) {
+        this.sendPing();
+      }
     }
   }
 
   public setWsSender(sender: ((msg: any) => void) | null) {
+    if (!this.isEnabled) return;
     this.wsSendCallback = sender;
+    if (sender && this.isTabVisible) {
+      // Measure initial connection latency once without starting continuous home-screen ping spam
+      this.sendPing();
+    }
+    this.syncEngineState();
+  }
+
+  private syncEngineState() {
+    if (!this.isEnabled) return;
+    const shouldRunFpsLoop = this.isTabVisible && (this.isInGame || this.isHudVisible);
+    const shouldRunContinuousPing =
+      this.isTabVisible && Boolean(this.wsSendCallback) && (this.isInGame || (this.isHudVisible && this.isHudExpanded));
+
+    if (shouldRunFpsLoop) {
+      this.start();
+    } else {
+      this.stopFpsLoop();
+    }
+
+    if (shouldRunContinuousPing) {
+      this.startPingLoop();
+    } else {
+      this.stopPingLoop();
+    }
   }
 
   public start() {
-    if (this.isRunning) return;
+    if (!this.isEnabled || this.isRunning) return;
     this.isRunning = true;
     this.lastFrameTime = performance.now();
     this.lastFpsUpdateTime = performance.now();
     this.frameCount = 0;
 
-    // Zero-overhead RAF loop: ONLY tracks frame counts and detects stalls. Zero allocations!
+    // Zero-overhead RAF loop: ONLY tracks frame counts and detects stalls when active
     const loop = (now: number) => {
       if (!this.isRunning) return;
 
       if (!this.isTabVisible || (typeof document !== 'undefined' && document.hidden)) {
         this.lastFrameTime = now;
-        this.animFrameId = requestAnimationFrame(loop);
         return;
       }
 
@@ -94,8 +145,7 @@ class PerformanceEngine {
 
       // Detect genuine frame stalls (>80ms or >2.5x the running frame time)
       if (delta < 500) {
-        // Average frame delta over past frames (~16.6ms at 60fps, ~33.3ms at 30fps)
-        const expectedDelta = this.currentFps > 0 ? (1000 / this.currentFps) : 16.6;
+        const expectedDelta = this.currentFps > 0 ? 1000 / this.currentFps : 16.6;
         const isTrueStall = delta > Math.max(75, expectedDelta * 2.2);
 
         if (this.isInGame && isTrueStall) {
@@ -109,45 +159,53 @@ class PerformanceEngine {
 
     this.animFrameId = requestAnimationFrame(loop);
 
-    // Periodic Telemetry Update: Runs once every 1,200ms out-of-band (Zero impact on game loop)
-    this.tickIntervalId = window.setInterval(() => {
-      if (!this.isRunning || !this.isTabVisible) return;
-      const now = performance.now();
-      const elapsedSec = (now - this.lastFpsUpdateTime) / 1000;
-      if (elapsedSec > 0 && this.frameCount > 0) {
-        this.currentFps = Math.min(144, Math.max(1, Math.round(this.frameCount / elapsedSec)));
-        this.fpsSamples.push(this.currentFps);
-        if (this.fpsSamples.length > 20) this.fpsSamples.shift();
-      }
+    // Periodic Telemetry Update: Runs once every 1,200ms out-of-band
+    if (!this.tickIntervalId) {
+      this.tickIntervalId = window.setInterval(() => {
+        if (!this.isRunning || !this.isTabVisible) return;
+        const now = performance.now();
+        const elapsedSec = (now - this.lastFpsUpdateTime) / 1000;
+        if (elapsedSec > 0 && this.frameCount > 0) {
+          this.currentFps = Math.min(144, Math.max(1, Math.round(this.frameCount / elapsedSec)));
+          this.fpsSamples.push(this.currentFps);
+          if (this.fpsSamples.length > 20) this.fpsSamples.shift();
+        }
 
-      this.frameCount = 0;
-      this.lastFpsUpdateTime = now;
+        this.frameCount = 0;
+        this.lastFpsUpdateTime = now;
 
-      const metrics = this.getMetrics();
+        const metrics = this.getMetrics();
 
-      // Notify registered direct-DOM UI subscribers
-      if (this.listeners.size > 0) {
-        this.listeners.forEach((fn) => {
-          try {
-            fn(metrics);
-          } catch (err) {
-            console.error('Error in perf listener:', err);
-          }
-        });
-      }
-    }, 1200);
+        if (this.listeners.size > 0) {
+          this.listeners.forEach((fn) => {
+            try {
+              fn(metrics);
+            } catch (err) {
+              console.error('Error in perf listener:', err);
+            }
+          });
+        }
+      }, 1200);
+    }
+  }
 
-    // Periodic Ping (every 3.5 seconds)
+  private startPingLoop() {
+    if (this.pingIntervalId) return;
     this.pingIntervalId = window.setInterval(() => {
       if (this.isTabVisible && this.wsSendCallback) {
         this.sendPing();
       }
     }, 3500);
-
-    this.sendPing();
   }
 
-  public stop() {
+  private stopPingLoop() {
+    if (this.pingIntervalId) {
+      clearInterval(this.pingIntervalId);
+      this.pingIntervalId = null;
+    }
+  }
+
+  private stopFpsLoop() {
     this.isRunning = false;
     if (this.animFrameId) {
       cancelAnimationFrame(this.animFrameId);
@@ -157,10 +215,11 @@ class PerformanceEngine {
       clearInterval(this.tickIntervalId);
       this.tickIntervalId = null;
     }
-    if (this.pingIntervalId) {
-      clearInterval(this.pingIntervalId);
-      this.pingIntervalId = null;
-    }
+  }
+
+  public stop() {
+    this.stopFpsLoop();
+    this.stopPingLoop();
   }
 
   public resetStats() {

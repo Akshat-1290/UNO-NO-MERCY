@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Sparkles, Layers, ChevronLeft, ChevronRight, Bot, Zap, Flame } from 'lucide-react';
-import { Card, GameState } from '../../../shared/src/types';
+import { Card, GameState } from '@uno/shared/types';
 import { UnoCard } from './UnoCard';
 import { HandCardItem } from './HandCardItem';
 import { DrawFlightData } from './CardDealFlight';
@@ -9,12 +9,12 @@ import { SpectatorBooth } from './SpectatorBooth';
 import { QuickEmoteWheel } from './QuickEmoteWheel';
 import { TableTauntFloating } from './TableTauntFloating';
 import { isValidPlay, isExactMatchForJumpIn } from '@uno/shared/unoDeck';
-import { triggerHaptic } from '../utils/haptics';
 
 interface LandscapeArenaProps {
   gameState: GameState;
   currentUserId: string;
   topCard: Card;
+  settledDiscardCard: Card;
   myCards: Card[];
   sortedCards: Card[];
   isMyTurn: boolean;
@@ -23,9 +23,14 @@ interface LandscapeArenaProps {
   handleCardClick: (card: Card) => void;
   slamEffect: boolean;
   flipEffect: boolean;
+  swapBannerText?: string;
   latestLogMessage?: { text: string };
   activeDrawFlight?: DrawFlightData | null;
   newlyDrawnCardIds?: Set<string>;
+  dealingHiddenCardIds?: Set<string>;
+  oppHiddenDrawCounts?: Record<string, number>;
+  inFlightDiscardCardId?: string | null;
+  isInitialDealing?: boolean;
   onCallUno: () => void;
   onCatchUno?: (targetPlayerId: string) => void;
   onSendTaunt?: (text: string) => void;
@@ -37,15 +42,19 @@ export const LandscapeArena: React.FC<LandscapeArenaProps> = ({
   gameState,
   currentUserId,
   topCard,
+  settledDiscardCard,
   myCards,
   sortedCards,
   isMyTurn,
   canPlayAnyCard,
   handleDrawCard,
   handleCardClick,
-  slamEffect,
   flipEffect,
+  swapBannerText,
   newlyDrawnCardIds,
+  dealingHiddenCardIds,
+  oppHiddenDrawCounts = {},
+  isInitialDealing = false,
   onCallUno,
   onCatchUno,
   onSendTaunt,
@@ -54,6 +63,9 @@ export const LandscapeArena: React.FC<LandscapeArenaProps> = ({
 }) => {
   const me = gameState.players.find((p) => p.id === currentUserId);
   const opponents = gameState.players.filter((p) => p.id !== currentUserId);
+  const displayedMyCardCount = isInitialDealing
+    ? myCards.length
+    : Math.max(0, myCards.length - (dealingHiddenCardIds?.size || 0));
 
   const handScrollRef = useRef<HTMLDivElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
@@ -141,21 +153,33 @@ export const LandscapeArena: React.FC<LandscapeArenaProps> = ({
       >
         {opponents.map((opp) => {
           const isOppTurn = gameState.players[gameState.currentTurnIndex]?.id === opp.id;
-          const isDanger = opp.cards.length >= (gameState.rules.mercyLimit || 25) - 3;
+          const mercyLimit = gameState.rules.mercyLimit || 25;
+          const hiddenOppDraws = oppHiddenDrawCounts[opp.id] || 0;
+          const displayedOppCards = Math.max(0, opp.cards.length - hiddenOppDraws);
+          const mercyRatio = displayedOppCards / mercyLimit;
+          const isDanger = !opp.isEliminated && (mercyRatio >= 0.8 || displayedOppCards >= mercyLimit - 4);
+          const isWarning = !opp.isEliminated && !isDanger && mercyRatio >= 0.6;
           const oppTaunts = (gameState.activeTaunts || []).filter((t) => t.playerId === opp.id);
 
           return (
             <div
               key={opp.id}
+              data-opponent-id={opp.id}
               className={`relative px-2 py-0.5 clip-chamfer border transition-all flex items-center space-x-1.5 shrink-0 ${
                 opp.isEliminated
                   ? 'bg-neutral-950 border-neutral-800 opacity-40 grayscale shadow-none'
+                  : isOppTurn && isDanger
+                  ? 'bg-[#280d14] border-2 border-red-500 ring-1 ring-amber-400/80 shadow-[2px_2px_0px_#ff2600]'
                   : isOppTurn
                   ? 'bg-[#221016] border-red-500 shadow-[2px_2px_0px_#ff2600]'
+                  : isDanger
+                  ? 'bg-red-950/50 border-2 border-red-500 shadow-[2px_2px_0px_#000]'
+                  : isWarning
+                  ? 'bg-amber-950/30 border border-amber-500/80 shadow-[2px_2px_0px_#000]'
                   : 'bg-[#14121a] border-neutral-800 shadow-[2px_2px_0px_#000]'
               }`}
             >
-              <TableTauntFloating taunts={oppTaunts} placement="overlay" />
+              <TableTauntFloating taunts={oppTaunts} placement="bottom" />
               <div className="relative">
                 <span className="text-sm">{opp.avatar || '👤'}</span>
               </div>
@@ -171,12 +195,14 @@ export const LandscapeArena: React.FC<LandscapeArenaProps> = ({
                   <span
                     className={`flex items-center gap-0.5 text-[9px] font-bold px-1 py-0.2 clip-chamfer-btn ${
                       isDanger
-                        ? 'bg-red-950 text-red-300 border border-red-600 font-black'
+                        ? 'bg-red-950 text-red-300 border border-red-500 font-black animate-pulse'
+                        : isWarning
+                        ? 'bg-amber-950/80 text-amber-300 border border-amber-500/80 font-black'
                         : 'bg-neutral-900 text-neutral-300'
                     }`}
                   >
                     <Layers className="w-2.5 h-2.5 opacity-70" />
-                    <span>{opp.cards.length}</span>
+                    <span>{displayedOppCards}/{mercyLimit}</span>
                   </span>
                 )}
 
@@ -207,10 +233,10 @@ export const LandscapeArena: React.FC<LandscapeArenaProps> = ({
 
       {/* 2. MIDDLE ZONE */}
       <div className="flex-1 w-full min-h-[140px] relative my-0.5 flex items-center justify-between px-1">
-        {/* LEFT: Player Info & Actions */}
-        <div className="w-28 sm:w-32 flex flex-col justify-center gap-1 shrink-0 z-20">
+        {/* LEFT: Player Info & Taunts (Fixed Stable Layout, Zero Reflow) */}
+        <div className="w-28 sm:w-32 flex flex-col justify-center gap-1.5 shrink-0 z-20">
           {me && (
-            <div className="flex items-center gap-1.5">
+            <div className="relative flex items-center gap-1.5">
               <TableTauntFloating
                 taunts={(gameState.activeTaunts || []).filter((t) => t.playerId === me.id)}
               />
@@ -221,7 +247,7 @@ export const LandscapeArena: React.FC<LandscapeArenaProps> = ({
                 size="sm"
               />
               <div className="text-[10px] font-black text-white leading-tight">
-                <div className="uppercase">Hand ({myCards.length})</div>
+                <div className="uppercase">Hand ({displayedMyCardCount})</div>
                 <div className="text-[8px] text-neutral-400 font-bold uppercase">
                   Limit: {gameState.rules.mercyLimit || 25}
                 </div>
@@ -229,73 +255,18 @@ export const LandscapeArena: React.FC<LandscapeArenaProps> = ({
             </div>
           )}
 
-          {/* Action Buttons */}
-          <div className="flex flex-col gap-1 mt-0.5">
+          {/* Stable Taunts & Control Bar (Zero Layout Shift) */}
+          <div className="flex items-center gap-1">
             {(me?.isAfk || me?.isBot) && (
               <button
                 type="button"
                 onClick={onResumeControl}
-                className="btn-stamp-slam clip-chamfer-btn w-full py-1 px-1 bg-amber-400 text-black font-black text-[9px] uppercase border border-white flex items-center justify-center gap-1 cursor-pointer"
+                className="btn-stamp-slam clip-chamfer-btn flex-1 py-1 px-1 bg-amber-400 text-black font-black text-[9px] uppercase border border-white flex items-center justify-center gap-1 cursor-pointer"
               >
                 <Bot className="w-3 h-3 text-black" />
-                <span>Resume Play</span>
+                <span>Resume</span>
               </button>
             )}
-
-            {isMyTurn && !canPlayAnyCard && (
-              <button
-                type="button"
-                onClick={handleDrawCard}
-                className="btn-stamp-slam clip-chamfer-btn w-full py-1 px-2 bg-red-600 hover:bg-red-500 text-white font-black text-[10px] uppercase border border-amber-400 cursor-pointer text-center"
-              >
-                {gameState.activePenalty > 0 ? `+${gameState.activePenalty} Penalty` : 'Draw Card'}
-              </button>
-            )}
-
-            {(() => {
-              const canCallUno = !me?.hasCalledUno && (myCards.length === 1 || (isMyTurn && myCards.length === 2));
-              const hasCalledUnoSafe = Boolean(me?.hasCalledUno && myCards.length === 1);
-
-              if (canCallUno) {
-                return (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      triggerHaptic('uno');
-                      onCallUno();
-                    }}
-                    className="btn-stamp-slam clip-chamfer-btn w-full py-1 px-2 bg-amber-400 hover:bg-amber-300 text-black font-black text-[10px] uppercase border border-white cursor-pointer text-center"
-                  >
-                    📢 UNO!
-                  </button>
-                );
-              }
-              if (hasCalledUnoSafe) {
-                return (
-                  <div className="w-full py-0.5 px-1.5 clip-chamfer-btn bg-emerald-950 border border-emerald-500 text-emerald-400 font-bold text-[9px] uppercase tracking-wide text-center">
-                    UNO SAFE
-                  </div>
-                );
-              }
-              return null;
-            })()}
-
-            {gameState.players
-              .filter((p) => p.id !== me?.id && !p.isEliminated && p.cards.length === 1 && !p.hasCalledUno)
-              .map((target) => (
-                <button
-                  key={target.id}
-                  type="button"
-                  onClick={() => {
-                    triggerHaptic('penalty');
-                    onCatchUno?.(target.id);
-                  }}
-                  className="btn-stamp-slam clip-chamfer-btn w-full py-0.5 px-1 bg-red-600 text-white font-black text-[8.5px] uppercase border border-amber-400 cursor-pointer"
-                  title={`Catch ${target.name} for not calling UNO! (+2 penalty cards)`}
-                >
-                  🚨 CATCH {target.name.slice(0, 5)}!
-                </button>
-              ))}
 
             {onSendTaunt && (
               <div className="flex items-center">
@@ -305,26 +276,21 @@ export const LandscapeArena: React.FC<LandscapeArenaProps> = ({
           </div>
         </div>
 
-        {/* CENTER TABLE */}
+        {/* CENTER TABLE (Fixed Coordinates, Zero Bouncing) */}
         <div className="absolute inset-0 flex flex-col items-center justify-center relative z-10 pointer-events-none min-h-0">
-          {gameState.activePenalty > 0 && (
-            <div className="mb-1.5 px-2 py-0.5 clip-chamfer-btn bg-red-600 text-white font-black text-[9px] tracking-wider uppercase flex items-center space-x-1 border border-amber-400 pointer-events-auto">
-              <Flame className="w-3 h-3 text-amber-300" />
-              <span>+{gameState.activePenalty} PENALTY</span>
-            </div>
-          )}
-
-          {flipEffect && (
-            <div className="mb-0.5 px-2 py-0.2 clip-chamfer-btn bg-amber-400 text-black font-black text-[9px] uppercase flex items-center space-x-1 pointer-events-auto">
-              <Sparkles className="w-2.5 h-2.5 text-black" />
-              <span>{topCard.value === '7' ? '7 SWAP' : '0 PASS'}</span>
-            </div>
-          )}
-
           {/* Draw & Discard */}
           <div className="flex items-center justify-center gap-3 sm:gap-5 relative pointer-events-auto">
-            {/* Draw Pile */}
+            {/* Draw Pile (3D Physical Dealer Stack) */}
             <div className="flex flex-col items-center relative">
+              {/* 3D Stack Depth Layers */}
+              <div
+                aria-hidden="true"
+                className="absolute inset-0 translate-x-[4px] translate-y-[4px] rounded-xl bg-[#07070b] border border-neutral-800 pointer-events-none"
+              />
+              <div
+                aria-hidden="true"
+                className="absolute inset-0 translate-x-[2px] translate-y-[2px] rounded-xl bg-[#0c0c12] border border-neutral-700/80 pointer-events-none"
+              />
               <button
                 id="uno-draw-deck"
                 type="button"
@@ -354,10 +320,16 @@ export const LandscapeArena: React.FC<LandscapeArenaProps> = ({
               </button>
             </div>
 
-            {/* Discard Pile */}
+            {/* Discard Pile (Clean Solid Single Card) */}
             <div className="flex flex-col items-center relative">
-              <div className="relative">
-                <UnoCard card={topCard} size="sm" disabled />
+              <div id="uno-discard-pile" className="relative">
+                <div className={isInitialDealing ? 'invisible' : 'visible'}>
+                  <UnoCard
+                    card={settledDiscardCard}
+                    size="sm"
+                    disabled
+                  />
+                </div>
                 <div
                   className={`absolute -inset-1 clip-chamfer -z-10 border transition-colors ${
                     gameState.currentColor === 'red'
@@ -390,8 +362,81 @@ export const LandscapeArena: React.FC<LandscapeArenaProps> = ({
           </div>
         </div>
 
-        {/* Symmetry Spacer */}
-        <div className="w-28 sm:w-32 shrink-0 z-20 pointer-events-none opacity-0" aria-hidden="true" />
+        {/* RIGHT SIDE: Action Buttons, Match Events & Stacking HUD (Zero Layout Shifts) */}
+        <div className="w-28 sm:w-32 shrink-0 z-20 flex flex-col items-end justify-center gap-1">
+          <div className="w-full flex flex-col items-end gap-1">
+            {/* Draw / Take Penalty Action Button (Positioned safely on Right HUD) */}
+            {isMyTurn && !canPlayAnyCard && (
+              <button
+                type="button"
+                onClick={handleDrawCard}
+                className="btn-stamp-slam clip-chamfer-btn w-full py-1 px-1.5 bg-red-600 hover:bg-red-500 text-white font-black text-[9.5px] uppercase border border-amber-400 shadow-[2px_2px_0px_#000] cursor-pointer text-center animate-pulse"
+              >
+                {gameState.activePenalty > 0 ? `+${gameState.activePenalty} Penalty` : 'Draw Card'}
+              </button>
+            )}
+
+            {/* UNO Shout & Catch Actions */}
+            {(() => {
+              const canCallUno = !me?.hasCalledUno && (myCards.length === 1 || (isMyTurn && myCards.length === 2));
+              const hasCalledUnoSafe = Boolean(me?.hasCalledUno && myCards.length === 1);
+
+              if (canCallUno) {
+                return (
+                  <button
+                    type="button"
+                    onClick={onCallUno}
+                    className="btn-stamp-slam clip-chamfer-btn w-full py-1 px-1.5 bg-amber-400 hover:bg-amber-300 text-black font-black text-[9.5px] uppercase border border-white cursor-pointer text-center animate-bounce"
+                  >
+                    📢 UNO!
+                  </button>
+                );
+              }
+              if (hasCalledUnoSafe) {
+                return (
+                  <div className="w-full py-0.5 px-1 clip-chamfer-btn bg-emerald-950 border border-emerald-500 text-emerald-400 font-bold text-[8.5px] uppercase tracking-wide text-center">
+                    UNO SAFE ✓
+                  </div>
+                );
+              }
+              return null;
+            })()}
+
+            {gameState.players
+              .filter((p) => p.id !== me?.id && !p.isEliminated && p.cards.length === 1 && !p.hasCalledUno)
+              .map((target) => (
+                <button
+                  key={target.id}
+                  type="button"
+                  onClick={() => onCatchUno?.(target.id)}
+                  className="btn-stamp-slam clip-chamfer-btn w-full py-0.5 px-1 bg-red-600 text-white font-black text-[8px] uppercase border border-amber-400 cursor-pointer text-center"
+                  title={`Catch ${target.name} for not calling UNO! (+2 penalty cards)`}
+                >
+                  🚨 CATCH {target.name.slice(0, 5)}!
+                </button>
+              ))}
+
+            {gameState.activePenalty > 0 && (
+              <div className="w-full px-2 py-0.5 clip-chamfer-btn bg-red-600 text-white font-black text-[8.5px] tracking-wider uppercase flex items-center justify-center space-x-1 border border-amber-400 shadow-[2px_2px_0px_#000] animate-pulse">
+                <Flame className="w-3 h-3 text-amber-300 flex-shrink-0" />
+                <span className="truncate">+{gameState.activePenalty} STACK</span>
+              </div>
+            )}
+
+            {flipEffect && (
+              <div className="w-full px-2 py-0.5 clip-chamfer-btn bg-amber-400 text-black font-black text-[8.5px] uppercase flex items-center justify-center space-x-1 shadow-[2px_2px_0px_#000] animate-bounce">
+                <Sparkles className="w-2.5 h-2.5 text-black flex-shrink-0" />
+                <span className="truncate">{swapBannerText?.includes('7') ? '7 SWAP' : '0 PASS'}</span>
+              </div>
+            )}
+
+            {/* Direction & Status Tag */}
+            <div className="px-2 py-0.5 clip-chamfer-btn bg-[#14121a] border border-neutral-700 text-[8px] font-mono-hud text-neutral-300 font-bold uppercase flex items-center gap-1 self-end">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+              <span>{gameState.direction === 1 ? 'CW' : 'CCW'}</span>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* 3. BOTTOM ZONE: User Hand */}
@@ -447,6 +492,7 @@ export const LandscapeArena: React.FC<LandscapeArenaProps> = ({
                         isPlayable={playable}
                         isJumpInPlayable={jumpInEligible}
                         isNewlyDrawn={newlyDrawnCardIds?.has(card.id)}
+                        isDealingHidden={dealingHiddenCardIds?.has(card.id)}
                         size="sm"
                         onCardClick={handleCardClick}
                       />

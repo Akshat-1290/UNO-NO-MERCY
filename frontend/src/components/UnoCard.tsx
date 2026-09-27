@@ -55,6 +55,10 @@ export const UnoCard: React.FC<UnoCardProps> = React.memo(({
   const title = getCardTitle(card);
   const imageSrc = getCardImagePath(card, showBack);
 
+  React.useEffect(() => {
+    setImgError(false);
+  }, [imageSrc]);
+
   // Authentic UNO SHOW 'EM NO MERCY Card Back
   if (showBack) {
     return (
@@ -66,7 +70,7 @@ export const UnoCard: React.FC<UnoCardProps> = React.memo(({
           src="/cards/card_back.webp"
           alt="UNO Show 'Em No Mercy Card Back"
           loading="eager"
-          decoding="async"
+          decoding="sync"
           className="w-full h-full object-cover rounded-[9px] sm:rounded-[11px] select-none pointer-events-none"
         />
       </div>
@@ -105,8 +109,8 @@ export const UnoCard: React.FC<UnoCardProps> = React.memo(({
         ${isPlayable ? 'cursor-pointer ring-2 sm:ring-[2.5px] ring-white/95 brightness-110' : ''}
         ${isJumpInPlayable ? 'cursor-pointer ring-2 sm:ring-[2.5px] ring-amber-400 brightness-110' : ''}
         ${isSelected ? 'ring-2 sm:ring-[2.5px] ring-cyan-400' : ''}
-        ${!isPlayable && !isJumpInPlayable && !disabled ? 'opacity-90 hover:opacity-100' : ''}
-        ${disabled ? 'opacity-60 grayscale-[25%] cursor-not-allowed' : ''}
+        ${!isPlayable && !isJumpInPlayable && !disabled ? 'brightness-90 hover:brightness-100' : ''}
+        ${disabled ? 'cursor-default' : ''}
         ${className}
       `}
       title={title}
@@ -120,7 +124,7 @@ export const UnoCard: React.FC<UnoCardProps> = React.memo(({
             src={imageSrc}
             alt={title}
             loading="eager"
-            decoding="async"
+            decoding="sync"
             onError={() => setImgError(true)}
             className="w-full h-full object-cover select-none pointer-events-none rounded-[8px] sm:rounded-[10px]"
           />

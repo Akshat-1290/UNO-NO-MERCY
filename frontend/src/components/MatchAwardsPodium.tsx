@@ -1,5 +1,5 @@
 import React from 'react';
-import { MatchAward } from '../../../shared/src/types';
+import { MatchAward } from '@uno/shared/types';
 import { Trophy, Award, Skull, Shield, RotateCw, Flame, Crown } from 'lucide-react';
 
 interface MatchAwardsPodiumProps {

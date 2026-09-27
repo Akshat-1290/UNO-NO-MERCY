@@ -36,8 +36,26 @@ export function getBotDominantColor(bot: Player): CardColor {
   return maxColor;
 }
 
+const roomBotTimers = new Map<string, NodeJS.Timeout>();
+const roomBotExecuting = new Map<string, boolean>();
+
+export function clearBotTimer(roomId: string) {
+  const timer = roomBotTimers.get(roomId);
+  if (timer) {
+    clearTimeout(timer);
+    roomBotTimers.delete(roomId);
+  }
+  roomBotExecuting.delete(roomId);
+}
+
 export function checkAndTriggerBotTurn(game: GameState) {
-  if (game.status !== 'playing') return;
+  if (!game || game.status !== 'playing') {
+    clearBotTimer(game?.roomId || '');
+    return;
+  }
+
+  // Clear any existing timer for this room to avoid duplicate/stacked turn triggers
+  clearBotTimer(game.roomId);
 
   if (countConnectedHumanPlayers(game) === 0) {
     game.status = 'paused';
@@ -50,14 +68,50 @@ export function checkAndTriggerBotTurn(game: GameState) {
   const currentPlayer = game.players[game.currentTurnIndex];
   if (!currentPlayer || !currentPlayer.isBot || currentPlayer.isEliminated) return;
 
-  setTimeout(() => {
-    if (game.status !== 'playing') return;
-    if (countConnectedHumanPlayers(game) === 0) return;
-    const player = game.players[game.currentTurnIndex];
-    if (!player || player.id !== currentPlayer.id || player.isEliminated) return;
+  const isOpeningDeal = Boolean(game.startedAt && Date.now() - game.startedAt < 2500);
+  const recentRoulette =
+    game.lastRouletteDraw && Date.now() - game.lastRouletteDraw.timestamp < 4500
+      ? Math.min(game.lastRouletteDraw.cards.length, 12) * 360 + 600
+      : 0;
+  const delay =
+    (isOpeningDeal ? 2200 : 1150) + recentRoulette + Math.floor(Math.random() * 650);
 
-    handleBotPlay(game, player);
-  }, 1200 + Math.random() * 800);
+  const timer = setTimeout(() => {
+    roomBotTimers.delete(game.roomId);
+    if (roomBotExecuting.get(game.roomId)) return;
+
+    try {
+      roomBotExecuting.set(game.roomId, true);
+
+      if (game.status !== 'playing') return;
+      if (countConnectedHumanPlayers(game) === 0) return;
+
+      const player = game.players[game.currentTurnIndex];
+      if (!player || player.id !== currentPlayer.id || !player.isBot || player.isEliminated) return;
+
+      handleBotPlay(game, player);
+    } catch (error) {
+      console.error(`[BotEngine Error Boundary] Handled bot turn error in room "${game.roomId}":`, error);
+      // Failsafe recovery: execute a standard draw so turn timer doesn't get stuck
+      try {
+        const player = game.players[game.currentTurnIndex];
+        if (player && player.isBot && !player.isEliminated && game.status === 'playing') {
+          if (game.activePenalty > 0) {
+            executeDrawPenalty(game, player);
+          } else {
+            executePlayerDraw(game, player);
+          }
+          sendFullSync(game);
+        }
+      } catch (recoveryError) {
+        console.error(`[BotEngine Recovery Failed] in room "${game.roomId}":`, recoveryError);
+      }
+    } finally {
+      roomBotExecuting.set(game.roomId, false);
+    }
+  }, delay);
+
+  roomBotTimers.set(game.roomId, timer);
 }
 
 export function handleBotPlay(game: GameState, bot: Player) {

@@ -9,6 +9,8 @@ import {
   broadcastToRoom,
   sendFullSync,
   recordMatchFinish,
+  broadcastLobbyListUpdate,
+  sendActiveMatchStatus,
 } from './state';
 import { checkAndTriggerBotTurn } from './botEngine';
 import { LiveMatchStats } from './types';
@@ -56,7 +58,11 @@ export function checkMercyRule(game: GameState): boolean {
         }
       }, 5000);
 
-      game.discardPile.push(...player.cards);
+      const recycledHand = player.cards.map((c) => ({
+        ...c,
+        chosenColor: undefined,
+      }));
+      game.discardPile.unshift(...recycledHand);
       player.cards = [];
 
       broadcastLog(
@@ -69,6 +75,7 @@ export function checkMercyRule(game: GameState): boolean {
       if (profile) {
         profile.mercyEliminationsSuffered = (profile.mercyEliminationsSuffered || 0) + 1;
       }
+      sendActiveMatchStatus(player.id);
     }
   });
 
@@ -156,6 +163,7 @@ export function advanceTurn(game: GameState, skipCount = 1) {
     }
   }
   game.turnTimeRemaining = game.rules.turnTimerSeconds || 30;
+  (game as any).turnGraceStartedAt = undefined;
 
   checkAndTriggerBotTurn(game);
 }
@@ -187,7 +195,10 @@ export function replenishDrawPile(game: GameState) {
 
   if (game.discardPile.length > 1) {
     const topCard = game.discardPile[game.discardPile.length - 1];
-    const cardsToRecycle = game.discardPile.slice(0, -1);
+    const cardsToRecycle = game.discardPile.slice(0, -1).map((c) => ({
+      ...c,
+      chosenColor: undefined,
+    }));
     game.discardPile = [topCard];
     deck.push(...shuffleDeck(cardsToRecycle));
   }
@@ -227,6 +238,17 @@ export function executePlayCard(
     game.currentColor = card.color;
   }
 
+  // Handle Discard All: place matching color cards underneath the played Discard All card so topCard stays consistent
+  let discardedMatchingCount = 0;
+  if (card.value === 'discard_all' && game.rules.allowDiscardAll) {
+    const discardMatching = player.cards.filter((c) => c.color === card.color);
+    if (discardMatching.length > 0) {
+      discardedMatchingCount = discardMatching.length;
+      player.cards = player.cards.filter((c) => c.color !== card.color);
+      game.discardPile.push(...discardMatching);
+    }
+  }
+
   game.discardPile.push(card);
 
   const penalty = getPenaltyAmount(card.value);
@@ -253,18 +275,12 @@ export function executePlayCard(
     broadcastLog(game, `🃏 ${player.name}: ${card.color} ${card.value}`, 'play');
   }
 
-  // Handle Discard All
-  if (card.value === 'discard_all' && game.rules.allowDiscardAll) {
-    const discardMatching = player.cards.filter((c) => c.color === card.color);
-    if (discardMatching.length > 0) {
-      player.cards = player.cards.filter((c) => c.color !== card.color);
-      game.discardPile.push(...discardMatching);
-      broadcastLog(
-        game,
-        `💥 ${player.name}: Discard All ${card.color} (-${discardMatching.length})`,
-        'play'
-      );
-    }
+  if (discardedMatchingCount > 0) {
+    broadcastLog(
+      game,
+      `💥 ${player.name}: Discard All ${card.color} (-${discardedMatchingCount})`,
+      'play'
+    );
   }
 
   // Check Win condition (0 cards)
@@ -326,22 +342,25 @@ export function executePlayCard(
   if (card.value === '0' && game.rules.allow0PassAll) {
     const activePlayers = game.players.filter((p) => !p.isEliminated);
     if (activePlayers.length > 1) {
-      if (game.direction === 1) {
-        const lastHand = activePlayers[activePlayers.length - 1].cards;
-        for (let i = activePlayers.length - 1; i > 0; i--) {
-          activePlayers[i].cards = activePlayers[i - 1].cards;
-        }
-        activePlayers[0].cards = lastHand;
-      } else {
-        const firstHand = activePlayers[0].cards;
-        for (let i = 0; i < activePlayers.length - 1; i++) {
-          activePlayers[i].cards = activePlayers[i + 1].cards;
-        }
-        activePlayers[activePlayers.length - 1].cards = firstHand;
+      // Capture each active player's hand immutably before rotation
+      const hands = activePlayers.map((p) => [...p.cards]);
+      const n = activePlayers.length;
+
+      // In play direction:
+      // When direction == 1 (clockwise, turn goes i -> (i+1)%n),
+      // each player passes their hand to the player in front of them:
+      // Player i receives the hand from player (i - 1 + n) % n.
+      // When direction == -1 (counter-clockwise, turn goes i -> (i-1)%n),
+      // Player i receives the hand from player (i + 1) % n.
+      for (let i = 0; i < n; i++) {
+        const fromIndex = game.direction === 1 ? (i - 1 + n) % n : (i + 1) % n;
+        activePlayers[i].cards = [...hands[fromIndex]];
       }
+
       activePlayers.forEach((p) => {
         p.hasCalledUno = false;
       });
+
       const stats = roomMatchStats.get(game.roomId);
       if (stats) {
         stats.handSwaps.set(player.id, (stats.handSwaps.get(player.id) || 0) + 1);
@@ -349,11 +368,26 @@ export function executePlayCard(
           stats.peakCards.set(p.id, Math.max(stats.peakCards.get(p.id) || 0, p.cards.length));
         });
       }
+
       broadcastLog(
         game,
-        `🌪️ Hands passed ${game.direction === 1 ? 'clockwise' : 'counter-clockwise'}`,
+        `🌪️ All hands passed ${game.direction === 1 ? 'clockwise' : 'counter-clockwise'}!`,
         'swap'
       );
+
+      // Check if any player now has 0 cards after the pass
+      const zeroCardsPlayer = activePlayers.find((p) => p.cards.length === 0);
+      if (zeroCardsPlayer) {
+        game.status = 'ended';
+        game.winnerId = zeroCardsPlayer.id;
+        game.winnerReason = 'cleared_hand';
+        game.endedAt = Date.now();
+        broadcastLog(game, `🏆 ${zeroCardsPlayer.name} received an empty hand and won the game!`, 'win');
+        recordMatchFinish(game, zeroCardsPlayer);
+        sendFullSync(game);
+        return;
+      }
+
       checkMercyRule(game);
     }
   }
@@ -398,6 +432,7 @@ export function executePlayCard(
 
 export function executeColorRouletteDraw(game: GameState, victim: Player, targetColor: CardColor) {
   let drawnCount = 0;
+  const drawnCards: Card[] = [];
   const maxSafety = game.rules.mercyLimit > 0
     ? Math.max(1, game.rules.mercyLimit - victim.cards.length + 1)
     : 25;
@@ -406,6 +441,7 @@ export function executeColorRouletteDraw(game: GameState, victim: Player, target
     const drawn = drawCardFromPile(game);
     if (!drawn) break;
     victim.cards.push(drawn);
+    drawnCards.push({ ...drawn });
     drawnCount++;
 
     if (drawn.color === targetColor || drawn.color === 'wild') {
@@ -416,6 +452,15 @@ export function executeColorRouletteDraw(game: GameState, victim: Player, target
       break;
     }
   }
+
+  game.lastRouletteDraw = {
+    id: `roulette_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    victimId: victim.id,
+    victimName: victim.name,
+    targetColor,
+    cards: drawnCards,
+    timestamp: Date.now(),
+  };
 
   const stats = roomMatchStats.get(game.roomId);
   if (stats) {
@@ -533,9 +578,12 @@ export function startGame(game: GameState) {
   game.activePenalty = 0;
   game.lastPenaltyCard = undefined;
   game.lastElimination = undefined;
+  game.lastRouletteDraw = undefined;
   game.awards = undefined;
   game.activeTaunts = [];
+  game.logs = [];
   game.turnTimeRemaining = game.rules.turnTimerSeconds || 30;
+  (game as any).turnGraceStartedAt = undefined;
 
   let initialDeck: Card[] = [];
   if (game.players.length > 4) {
@@ -580,5 +628,6 @@ export function startGame(game: GameState) {
   );
 
   sendFullSync(game);
+  broadcastLobbyListUpdate();
   checkAndTriggerBotTurn(game);
 }

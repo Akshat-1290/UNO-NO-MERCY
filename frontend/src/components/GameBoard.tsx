@@ -1,24 +1,29 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Card, CardColor, GameState, Player, ChatMessage } from '../../../shared/src/types';
+import { Card, CardColor, GameState, Player, ChatMessage } from '@uno/shared/types';
 import { UnoCard } from './UnoCard';
 import { HandCardItem } from './HandCardItem';
-import { CardDealFlight, DrawFlightData } from './CardDealFlight';
-import { timerSync } from '../utils/timerSync';
-import { ChatPanel } from './ChatPanel';
+import {
+  CardDealFlight,
+  DrawFlightData,
+  InitialDealConfig,
+  PlayedCardFlightData,
+} from './CardDealFlight';
 import { MercyDangerMeter } from './MercyDangerMeter';
 import { QuickEmoteWheel } from './QuickEmoteWheel';
 import { TableTauntFloating } from './TableTauntFloating';
 import { SpectatorBooth } from './SpectatorBooth';
-import { KillcamHighlight } from './KillcamHighlight';
-import { MatchAwardsPodium } from './MatchAwardsPodium';
 import { LandscapeArena } from './LandscapeArena';
+import { TurnTimerBadge } from './board/TurnTimerBadge';
+import { GameBoardModals } from './board/GameBoardModals';
 import {
   isExactMatchForJumpIn,
   isValidPlay,
   isWildCard,
   getPenaltyAmount,
+  preloadAllCardImages,
 } from '@uno/shared/unoDeck';
-import { playSound } from '../utils/sound';
+import { playSound, stopCardAnimationSounds } from '../utils/sound';
+import { useSequentialGameQueue } from '../utils/gameEventQueue';
 import { triggerHaptic } from '../utils/haptics';
 import confetti from 'canvas-confetti';
 import { motion } from 'motion/react';
@@ -35,7 +40,6 @@ import {
   Skull,
   Layers,
   Shuffle,
-  Trophy,
   Zap,
   LogOut,
   Share2,
@@ -43,12 +47,10 @@ import {
   AlertTriangle,
   BookOpen,
   MessageSquare,
-  X,
   Maximize2,
   Minimize2,
   ChevronLeft,
   ChevronRight,
-  Radio,
 } from 'lucide-react';
 
 interface GameBoardProps {
@@ -69,91 +71,8 @@ interface GameBoardProps {
   onResumeControl?: () => void;
 }
 
-interface TurnTimerBadgeProps {
-  isMyTurn: boolean;
-  currentPlayerName?: string;
-  turnTimeRemaining: number;
-  turnTimerSeconds: number;
-  currentTurnIndex: number;
-  status: string;
-}
-
-const TurnTimerBadge: React.FC<TurnTimerBadgeProps> = React.memo(({
-  isMyTurn,
-  currentPlayerName,
-  turnTimeRemaining,
-  turnTimerSeconds,
-  currentTurnIndex,
-  status,
-}) => {
-  const [smoothSeconds, setSmoothSeconds] = useState<number>(turnTimeRemaining);
-  const syncRef = useRef<{ remaining: number; timestamp: number }>({
-    remaining: turnTimeRemaining,
-    timestamp: Date.now(),
-  });
-
-  useEffect(() => {
-    const unsubscribe = timerSync.subscribe((seconds) => {
-      syncRef.current = {
-        remaining: seconds,
-        timestamp: Date.now(),
-      };
-      setSmoothSeconds(seconds);
-    });
-    return unsubscribe;
-  }, []);
-
-  useEffect(() => {
-    syncRef.current = {
-      remaining: turnTimeRemaining,
-      timestamp: Date.now(),
-    };
-    setSmoothSeconds(turnTimeRemaining);
-  }, [turnTimeRemaining, currentTurnIndex]);
-
-  useEffect(() => {
-    if (status !== 'playing' || !turnTimerSeconds) return;
-
-    const interval = setInterval(() => {
-      const elapsed = (Date.now() - syncRef.current.timestamp) / 1000;
-      const current = Math.max(0, syncRef.current.remaining - elapsed);
-      setSmoothSeconds(Math.ceil(current));
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [status, turnTimerSeconds, currentTurnIndex]);
-
-  const displaySeconds = Math.ceil(smoothSeconds);
-
-  if (isMyTurn) {
-    return (
-      <div className="flex items-center space-x-1.5 px-3 py-1 clip-chamfer-btn bg-red-600 text-white font-mono-hud font-black text-xs shadow-[2px_2px_0px_#000] border border-red-400">
-        <Radio className="w-3.5 h-3.5 text-white animate-pulse" />
-        <span className="tracking-wider uppercase">YOUR TURN</span>
-        {turnTimerSeconds > 0 && (
-          <span className="bg-black/60 px-1.5 py-0.2 clip-chamfer-btn text-[10px] text-amber-300 font-mono">
-            {displaySeconds}S
-          </span>
-        )}
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex items-center space-x-2 px-2.5 py-1 clip-chamfer-btn bg-[#141219] border border-neutral-700 text-neutral-300 text-xs font-mono-hud font-bold">
-      <span className="w-2 h-2 bg-amber-400 shrink-0" />
-      <span className="truncate max-w-[90px] sm:max-w-[150px] uppercase">
-        {currentPlayerName ? `${currentPlayerName}` : 'WAITING'}
-      </span>
-      {turnTimerSeconds > 0 && (
-        <span className="text-[10px] text-amber-400 font-mono font-bold">({displaySeconds}S)</span>
-      )}
-    </div>
-  );
-});
-
 export const GameBoard: React.FC<GameBoardProps> = ({
-  gameState,
+  gameState: incomingGameState,
   currentUserId,
   onPlayCard,
   onDrawCard,
@@ -169,6 +88,15 @@ export const GameBoard: React.FC<GameBoardProps> = ({
   onReturnToLobby,
   onResumeControl,
 }) => {
+  const lastLocalPlayedCardIdRef = useRef<string | null>(null);
+  const {
+    displayedGameState: gameState,
+    playbackSpeed,
+    tabResumeCount,
+    lockAnimation,
+    unlockAnimation,
+  } = useSequentialGameQueue(incomingGameState, lastLocalPlayedCardIdRef);
+
   const [selectedWildCard, setSelectedWildCard] = useState<Card | null>(null);
   const [selected7Card, setSelected7Card] = useState<Card | null>(null);
   const [dismissedKillcamId, setDismissedKillcamId] = useState<string | null>(null);
@@ -177,15 +105,25 @@ export const GameBoard: React.FC<GameBoardProps> = ({
   const [unreadChatCount, setUnreadChatCount] = useState(0);
   const [slamEffect, setSlamEffect] = useState(false);
   const [flipEffect, setFlipEffect] = useState(false);
-  const [showDrawFly, setShowDrawFly] = useState(false);
+  const [swapBannerText, setSwapBannerText] = useState<string>('🔁 0s PASS ALL HANDS!');
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
   const [cardHint, setCardHint] = useState<string | null>(null);
   const cardHintTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const swapEffectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const slamEffectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const elimToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const playedFlightSafetyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const processedLogIdsRef = useRef<Set<string>>(new Set());
   const [isPortraitMobile, setIsPortraitMobile] = useState(false);
   const [isLandscapeMobile, setIsLandscapeMobile] = useState(false);
   const [isShortHeight, setIsShortHeight] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // Preload all 85 card textures into browser memory cache on mount for zero-flicker transitions
+  useEffect(() => {
+    preloadAllCardImages();
+  }, []);
 
   // Horizontal Hand Scroller position indicators and controls
   const handScrollRef = useRef<HTMLDivElement>(null);
@@ -289,18 +227,409 @@ export const GameBoard: React.FC<GameBoardProps> = ({
 
   const me = gameState.players.find((p) => p.id === currentUserId);
   const myCards = me?.cards || [];
+  const opponents = gameState.players.filter((p) => p.id !== currentUserId);
+  const topCard = gameState.discardPile[gameState.discardPile.length - 1] || {
+    id: 'empty',
+    color: 'red',
+    value: '5',
+  };
+  const topCardRef = useRef<Card>(topCard);
+  topCardRef.current = topCard;
 
-  // Card Draw Tracking
+  // settledDiscardCard holds the card currently resting on #uno-discard-pile.
+  // It only updates to topCard once a flying card lands, preventing 1-frame flashes before/after flight.
+  const [settledDiscardCard, setSettledDiscardCard] = useState<Card>(topCard);
+
+  // Card Draw & Dealer Flight Tracking
   const prevMyCardsRef = useRef<Card[]>(myCards);
   const [newlyDrawnCardIds, setNewlyDrawnCardIds] = useState<Set<string>>(new Set());
+  const [dealingHiddenCardIds, setDealingHiddenCardIds] = useState<Set<string>>(new Set());
   const [activeDrawFlight, setActiveDrawFlight] = useState<DrawFlightData | null>(null);
+  const [initialDeal, setInitialDeal] = useState<InitialDealConfig | null>(null);
+  const [playedFlight, setPlayedFlight] = useState<PlayedCardFlightData | null>(null);
+  const [inFlightDiscardCardId, setInFlightDiscardCardId] = useState<string | null>(null);
+  const lastDealtMatchKeyRef = useRef<string>('');
+  const initialDealSafetyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const drawFlightSafetyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const oppFlightSafetyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const highlightSafetyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingPlayStartRectRef = useRef<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
+
+  // Synchronously detect if a fresh match or rematch is starting on Frame 0 before useEffects run
+  const currentMatchKey = `${gameState.roomId}_${gameState.startedAt || 'match'}`;
+  const isPendingInitialDeal =
+    gameState.status === 'playing' &&
+    lastDealtMatchKeyRef.current !== currentMatchKey &&
+    gameState.discardPile.length <= 2 &&
+    myCards.length > 0;
+  const isInitialDealing = Boolean(initialDeal) || isPendingInitialDeal;
+
+  const triggerSlamPulse = useCallback(() => {
+    setSlamEffect(true);
+    if (slamEffectTimerRef.current) {
+      clearTimeout(slamEffectTimerRef.current);
+    }
+    slamEffectTimerRef.current = setTimeout(() => {
+      slamEffectTimerRef.current = null;
+      setSlamEffect(false);
+    }, 600);
+  }, []);
+
+  const triggerSwapBanner = useCallback(
+    (bannerLabel: string) => {
+      setSwapBannerText(bannerLabel);
+      setFlipEffect(true);
+      lockAnimation('hand_swap', 850);
+      if (swapEffectTimerRef.current) {
+        clearTimeout(swapEffectTimerRef.current);
+      }
+      swapEffectTimerRef.current = setTimeout(() => {
+        swapEffectTimerRef.current = null;
+        setFlipEffect(false);
+        unlockAnimation('hand_swap');
+      }, 900);
+    },
+    [lockAnimation, unlockAnimation]
+  );
+
+  // Clean up all transient timers on unmount
+  useEffect(() => {
+    return () => {
+      if (cardHintTimeoutRef.current) clearTimeout(cardHintTimeoutRef.current);
+      if (swapEffectTimerRef.current) clearTimeout(swapEffectTimerRef.current);
+      if (slamEffectTimerRef.current) clearTimeout(slamEffectTimerRef.current);
+      if (elimToastTimerRef.current) clearTimeout(elimToastTimerRef.current);
+      if (playedFlightSafetyTimerRef.current) clearTimeout(playedFlightSafetyTimerRef.current);
+      if (initialDealSafetyTimerRef.current) clearTimeout(initialDealSafetyTimerRef.current);
+      if (drawFlightSafetyTimerRef.current) clearTimeout(drawFlightSafetyTimerRef.current);
+      if (oppFlightSafetyTimerRef.current) clearTimeout(oppFlightSafetyTimerRef.current);
+      if (highlightSafetyTimerRef.current) clearTimeout(highlightSafetyTimerRef.current);
+    };
+  }, []);
+
+  // Auto-dismiss non-victim Mercy KO toast after 3.8 seconds so it never lingers
+  useEffect(() => {
+    const elim = gameState.lastElimination;
+    if (!elim || elim.victimId === currentUserId || elim.id === dismissedKillcamId) {
+      return;
+    }
+    if (elimToastTimerRef.current) {
+      clearTimeout(elimToastTimerRef.current);
+    }
+    const targetId = elim.id;
+    elimToastTimerRef.current = setTimeout(() => {
+      elimToastTimerRef.current = null;
+      setDismissedKillcamId(targetId);
+    }, 3800);
+  }, [gameState.lastElimination, currentUserId, dismissedKillcamId]);
+
+  const handleCardLanded = useCallback((cardId: string) => {
+    setDealingHiddenCardIds((prev) => {
+      if (!prev.has(cardId)) return prev;
+      const next = new Set(prev);
+      next.delete(cardId);
+      return next;
+    });
+  }, []);
+
+  const handleRevealDiscardCard = useCallback((card: Card) => {
+    setSettledDiscardCard(card);
+  }, []);
+
+  const handleInitialDealComplete = useCallback(() => {
+    if (initialDealSafetyTimerRef.current) {
+      clearTimeout(initialDealSafetyTimerRef.current);
+      initialDealSafetyTimerRef.current = null;
+    }
+    setSettledDiscardCard(topCardRef.current);
+    setDealingHiddenCardIds(new Set());
+    setInitialDeal(null);
+    unlockAnimation('initial_deal');
+  }, [unlockAnimation]);
+
+  const handlePlayedCardLanded = useCallback(
+    (cardId: string) => {
+      if (playedFlightSafetyTimerRef.current) {
+        clearTimeout(playedFlightSafetyTimerRef.current);
+        playedFlightSafetyTimerRef.current = null;
+      }
+      setSettledDiscardCard(topCardRef.current);
+      setInFlightDiscardCardId((prev) => (prev === cardId ? null : prev));
+      setPlayedFlight((prev) => (prev?.card.id === cardId ? null : prev));
+      unlockAnimation('played_flight');
+    },
+    [unlockAnimation]
+  );
+
+  const handleFlightComplete = useCallback(() => {
+    if (drawFlightSafetyTimerRef.current) {
+      clearTimeout(drawFlightSafetyTimerRef.current);
+      drawFlightSafetyTimerRef.current = null;
+    }
+    setActiveDrawFlight(null);
+    setDealingHiddenCardIds(new Set());
+    unlockAnimation('player_draw');
+  }, [unlockAnimation]);
+
+  const handleOpponentFlightComplete = useCallback(() => {
+    if (oppFlightSafetyTimerRef.current) {
+      clearTimeout(oppFlightSafetyTimerRef.current);
+      oppFlightSafetyTimerRef.current = null;
+    }
+    setOpponentDrawFlight(null);
+    setOppHiddenDrawCounts({});
+    unlockAnimation('opponent_draw');
+  }, [unlockAnimation]);
+
+  const handleOpponentCardLanded = useCallback(
+    (opponentId: string, remainingHidden: number) => {
+      setOppHiddenDrawCounts((prev) => {
+        if ((prev[opponentId] || 0) === remainingHidden) return prev;
+        return {
+          ...prev,
+          [opponentId]: remainingHidden,
+        };
+      });
+    },
+    []
+  );
 
   // Opponent card draw tracking
   const prevOpponentCardsRef = useRef<Map<string, number>>(new Map());
+  const lastProcessedRouletteIdRef = useRef<string>('');
   const [opponentDrawFlight, setOpponentDrawFlight] = useState<DrawFlightData | null>(null);
+  const [oppHiddenDrawCounts, setOppHiddenDrawCounts] = useState<Record<string, number>>({});
+
+  // Trigger Opening Match Dealer Sequence when a fresh match begins (Works in Bot & Human lobbies)
+  useEffect(() => {
+    if (gameState.status !== 'playing') {
+      if (initialDealSafetyTimerRef.current) {
+        clearTimeout(initialDealSafetyTimerRef.current);
+        initialDealSafetyTimerRef.current = null;
+      }
+      if (swapEffectTimerRef.current) {
+        clearTimeout(swapEffectTimerRef.current);
+        swapEffectTimerRef.current = null;
+      }
+      stopCardAnimationSounds(0.02);
+      setFlipEffect(false);
+      setSlamEffect(false);
+      setDealingHiddenCardIds(new Set());
+      setInitialDeal(null);
+      setActiveDrawFlight(null);
+      setOpponentDrawFlight(null);
+      setOppHiddenDrawCounts({});
+      setPlayedFlight(null);
+      setInFlightDiscardCardId(null);
+      setSettledDiscardCard(topCard);
+      prevMyCardsRef.current = [];
+      prevOpponentCardsRef.current = new Map();
+      return;
+    }
+
+    const matchKey = `${gameState.roomId}_${gameState.startedAt || 'match'}`;
+    if (lastDealtMatchKeyRef.current !== matchKey && myCards.length > 0) {
+      lastDealtMatchKeyRef.current = matchKey;
+
+      // Reset transient banners & refs from any previous match
+      if (swapEffectTimerRef.current) {
+        clearTimeout(swapEffectTimerRef.current);
+        swapEffectTimerRef.current = null;
+      }
+      if (playedFlightSafetyTimerRef.current) {
+        clearTimeout(playedFlightSafetyTimerRef.current);
+        playedFlightSafetyTimerRef.current = null;
+      }
+      setFlipEffect(false);
+      setSlamEffect(false);
+      setPlayedFlight(null);
+      setInFlightDiscardCardId(null);
+      setSettledDiscardCard(topCard);
+      prevTopCardIdRef.current = topCard.id;
+      lastLocalPlayedCardIdRef.current = null;
+      processedLogIdsRef.current = new Set((gameState.logs || []).map((l) => l.id));
+
+      const isFreshStart = gameState.discardPile.length <= 2;
+
+      if (isFreshStart) {
+        const startHiddenIds = new Set(myCards.map((c) => c.id));
+        setDealingHiddenCardIds(startHiddenIds);
+        setActiveDrawFlight(null);
+        setOpponentDrawFlight(null);
+        setOppHiddenDrawCounts({});
+        lastProcessedRouletteIdRef.current = gameState.lastRouletteDraw?.id || '';
+        prevMyCardsRef.current = myCards;
+        const initOppMap = new Map<string, number>();
+        gameState.players.forEach((p) => {
+          if (p.id !== currentUserId) initOppMap.set(p.id, p.cards.length);
+        });
+        prevOpponentCardsRef.current = initOppMap;
+
+        lockAnimation('initial_deal', 2100);
+        setInitialDeal({
+          id: matchKey,
+          myCards: [...myCards],
+          opponentIds: gameState.players
+            .filter((p) => p.id !== currentUserId && !p.isEliminated)
+            .map((p) => p.id),
+          starterCard: topCard,
+          soundEnabled,
+        });
+
+        if (initialDealSafetyTimerRef.current) {
+          clearTimeout(initialDealSafetyTimerRef.current);
+        }
+        initialDealSafetyTimerRef.current = setTimeout(() => {
+          setSettledDiscardCard(topCardRef.current);
+          setDealingHiddenCardIds(new Set());
+          setInitialDeal(null);
+          unlockAnimation('initial_deal');
+        }, 2400);
+      }
+    }
+  }, [
+    gameState.status,
+    gameState.roomId,
+    gameState.startedAt,
+    gameState.discardPile.length,
+    gameState.logs,
+    currentUserId,
+    myCards,
+    topCard,
+    soundEnabled,
+    lockAnimation,
+    unlockAnimation,
+  ]);
+
+  // Process newly arrived game logs (Swap banners, UNO shouts, Mercy KOs) idempotently by log.id
+  const hasNewSwapInLogs = React.useMemo(() => {
+    const logs = gameState.logs || [];
+    for (let i = Math.max(0, logs.length - 4); i < logs.length; i++) {
+      const l = logs[i];
+      if (l?.type === 'swap' && l.id && !processedLogIdsRef.current.has(l.id)) {
+        return true;
+      }
+    }
+    return false;
+  }, [gameState.logs]);
+
+  // Synchronously detect newly drawn cards on Frame 0 (before useEffect runs) so they never flash in hand before flight
+  const effectiveDealingHiddenCardIds = React.useMemo(() => {
+    const lastLog = gameState.logs?.[gameState.logs.length - 1];
+    if (
+      gameState.status !== 'playing' ||
+      isInitialDealing ||
+      hasNewSwapInLogs ||
+      lastLog?.type === 'swap' ||
+      prevMyCardsRef.current.length === 0
+    ) {
+      return dealingHiddenCardIds;
+    }
+    const prevIds = new Set(prevMyCardsRef.current.map((c) => c.id));
+    let hasPendingNew = false;
+    for (const c of myCards) {
+      if (!prevIds.has(c.id) && !dealingHiddenCardIds.has(c.id)) {
+        hasPendingNew = true;
+        break;
+      }
+    }
+    if (!hasPendingNew) return dealingHiddenCardIds;
+    const next = new Set(dealingHiddenCardIds);
+    for (const c of myCards) {
+      if (!prevIds.has(c.id)) {
+        next.add(c.id);
+      }
+    }
+    return next;
+  }, [
+    myCards,
+    dealingHiddenCardIds,
+    gameState.status,
+    gameState.logs,
+    isInitialDealing,
+    hasNewSwapInLogs,
+  ]);
+
+  // Synchronously compute opponent hidden in-flight draw counts on Frame 0 so opponent card counts increment 1-by-1 as cards land
+  const effectiveOppHiddenDrawCounts = React.useMemo(() => {
+    const lastLog = gameState.logs?.[gameState.logs.length - 1];
+    if (
+      gameState.status !== 'playing' ||
+      isInitialDealing ||
+      hasNewSwapInLogs ||
+      lastLog?.type === 'swap' ||
+      prevOpponentCardsRef.current.size === 0
+    ) {
+      return oppHiddenDrawCounts;
+    }
+    let next: Record<string, number> | null = null;
+    for (const p of gameState.players) {
+      if (p.id !== currentUserId) {
+        const prevCount = prevOpponentCardsRef.current.get(p.id);
+        if (
+          prevCount !== undefined &&
+          p.cards.length > prevCount &&
+          oppHiddenDrawCounts[p.id] === undefined
+        ) {
+          if (!next) next = { ...oppHiddenDrawCounts };
+          next[p.id] = p.cards.length - prevCount;
+        }
+      }
+    }
+    return next || oppHiddenDrawCounts;
+  }, [
+    gameState.players,
+    gameState.status,
+    gameState.logs,
+    currentUserId,
+    isInitialDealing,
+    hasNewSwapInLogs,
+    oppHiddenDrawCounts,
+  ]);
+
+  const displayedMyCardCount = isInitialDealing
+    ? myCards.length
+    : Math.max(0, myCards.length - effectiveDealingHiddenCardIds.size);
+
+  useEffect(() => {
+    const logs = gameState.logs || [];
+    if (logs.length === 0) return;
+
+    const startIdx = Math.max(0, logs.length - 5);
+    for (let i = startIdx; i < logs.length; i++) {
+      const log = logs[i];
+      if (!log?.id || processedLogIdsRef.current.has(log.id)) continue;
+      processedLogIdsRef.current.add(log.id);
+
+      if (log.type === 'swap') {
+        const isPassAll =
+          log.text.toLowerCase().includes('all hands') ||
+          log.text.includes('🌪️') ||
+          topCardRef.current.value === '0';
+        triggerSwapBanner(
+          isPassAll ? '🔁 0s PASS ALL HANDS!' : '🔄 7s HAND SWAP!'
+        );
+      } else if (log.type === 'uno') {
+        if (soundEnabled) playSound('uno');
+      } else if (log.type === 'mercy') {
+        if (soundEnabled) playSound('mercy');
+      }
+    }
+  }, [gameState.logs, soundEnabled, triggerSwapBanner]);
 
   useEffect(() => {
     if (gameState.status !== 'playing') {
+      prevMyCardsRef.current = [];
+      return;
+    }
+
+    // If a fresh match or initial deal is starting, sync hand ref without triggering a mid-game draw flight
+    if (isInitialDealing) {
       prevMyCardsRef.current = myCards;
       return;
     }
@@ -311,59 +640,112 @@ export const GameBoard: React.FC<GameBoardProps> = ({
       return;
     }
 
+    const lastLog = gameState.logs?.[gameState.logs.length - 1];
+    // Hand Swap ('7' or '0' Pass All): sync hand without triggering a deck draw flight
+    if (hasNewSwapInLogs || lastLog?.type === 'swap') {
+      prevMyCardsRef.current = myCards;
+      return;
+    }
+
     const prevIds = new Set(prevCards.map((c) => c.id));
     const newCards = myCards.filter((c) => !prevIds.has(c.id));
 
     if (newCards.length > 0) {
       const newIds = new Set(newCards.map((c) => c.id));
       setNewlyDrawnCardIds(newIds);
+      // Keep newly drawn cards hidden in the hand until their 3D flying card touches down
+      setDealingHiddenCardIds((prev) => {
+        const next = new Set(prev);
+        newCards.forEach((c) => next.add(c.id));
+        return next;
+      });
 
-      const lastLog = gameState.logs?.[gameState.logs.length - 1];
       let reason: 'normal' | 'penalty' | 'roulette' | 'draw_until' = 'normal';
-      let label = `+${newCards.length} ${newCards.length > 1 ? 'Cards' : 'Card'}`;
+      let label = `+${newCards.length} ${newCards.length > 1 ? 'CARDS' : 'CARD'}`;
+      const isMeRoulette =
+        (gameState.lastRouletteDraw?.victimId === currentUserId &&
+          gameState.lastRouletteDraw?.id !== lastProcessedRouletteIdRef.current) ||
+        lastLog?.text.toLowerCase().includes('roulette') ||
+        lastLog?.text.includes('🎰');
 
-      if (lastLog?.text.toLowerCase().includes('roulette') || lastLog?.text.includes('🎰')) {
+      if (isMeRoulette) {
         reason = 'roulette';
         label = `ROULETTE (+${newCards.length})`;
-      } else if (newCards.length >= 2 || lastLog?.text.toLowerCase().includes('penalty') || lastLog?.text.includes('💥')) {
+        if (gameState.lastRouletteDraw?.id) {
+          lastProcessedRouletteIdRef.current = gameState.lastRouletteDraw.id;
+        }
+      } else if (
+        newCards.length >= 2 ||
+        lastLog?.text.toLowerCase().includes('penalty') ||
+        lastLog?.text.includes('💥')
+      ) {
         reason = 'penalty';
         label = `+${newCards.length} PENALTY`;
       }
 
-      if (soundEnabled) {
-        playSound('draw');
-      }
-      triggerHaptic(reason === 'penalty' ? 'penalty' : 'draw');
-
+      // Note: CardDealFlight plays 'card_pick' directly in sync with each card's launch from the deck
+      const visualMeCount = Math.min(newCards.length, reason === 'roulette' ? 12 : 8);
+      const stepMs =
+        reason === 'roulette' ? (visualMeCount > 7 ? 300 : 360) : 115;
+      const drawDurationMs = visualMeCount * stepMs + 680;
+      lockAnimation('player_draw', drawDurationMs);
       setActiveDrawFlight({
         id: `draw_${Date.now()}`,
         count: newCards.length,
+        cards: newCards,
         reason,
+        targetColor:
+          reason === 'roulette'
+            ? (gameState.lastRouletteDraw?.targetColor || gameState.currentColor).toUpperCase()
+            : undefined,
         label,
         target: 'me',
+        soundEnabled,
       });
 
-      const flightTimer = setTimeout(() => {
+      if (drawFlightSafetyTimerRef.current) {
+        clearTimeout(drawFlightSafetyTimerRef.current);
+      }
+      drawFlightSafetyTimerRef.current = setTimeout(() => {
         setActiveDrawFlight(null);
-      }, 700);
+        setDealingHiddenCardIds((prev) => {
+          if (prev.size === 0) return prev;
+          const next = new Set(prev);
+          newCards.forEach((c) => next.delete(c.id));
+          return next;
+        });
+        unlockAnimation('player_draw');
+      }, visualMeCount * stepMs + 760);
 
-      const highlightTimer = setTimeout(() => {
+      if (highlightSafetyTimerRef.current) {
+        clearTimeout(highlightSafetyTimerRef.current);
+      }
+      highlightSafetyTimerRef.current = setTimeout(() => {
         setNewlyDrawnCardIds(new Set());
       }, 2500);
-
-      prevMyCardsRef.current = myCards;
-      return () => {
-        clearTimeout(flightTimer);
-        clearTimeout(highlightTimer);
-      };
     }
 
     prevMyCardsRef.current = myCards;
-  }, [myCards, gameState.status, gameState.logs, soundEnabled]);
+  }, [
+    myCards,
+    gameState.status,
+    gameState.logs,
+    isInitialDealing,
+    hasNewSwapInLogs,
+    soundEnabled,
+    lockAnimation,
+    unlockAnimation,
+  ]);
 
-  // Track opponent draws
+  // Track opponent draws & plays
   useEffect(() => {
     if (gameState.status !== 'playing') return;
+    const lastLog = gameState.logs?.[gameState.logs.length - 1];
+    const isSwapOrInitial =
+      isInitialDealing ||
+      hasNewSwapInLogs ||
+      lastLog?.type === 'swap';
+
     const prevMap = prevOpponentCardsRef.current;
     const currentMap = new Map<string, number>();
 
@@ -371,32 +753,85 @@ export const GameBoard: React.FC<GameBoardProps> = ({
       if (p.id !== currentUserId) {
         currentMap.set(p.id, p.cards.length);
         const prevCount = prevMap.get(p.id);
-        if (prevCount !== undefined && p.cards.length > prevCount) {
-          const diff = p.cards.length - prevCount;
-          const lastLog = gameState.logs?.[gameState.logs.length - 1];
-          const isRoulette = lastLog?.text.toLowerCase().includes('roulette') || lastLog?.text.includes('🎰');
+        const isOppRouletteEvent =
+          Boolean(gameState.lastRouletteDraw?.id) &&
+          gameState.lastRouletteDraw?.victimId === p.id &&
+          gameState.lastRouletteDraw?.id !== lastProcessedRouletteIdRef.current;
+
+        if (
+          !isSwapOrInitial &&
+          ((prevCount !== undefined && p.cards.length > prevCount) || isOppRouletteEvent)
+        ) {
+          const rawDiff = prevCount !== undefined ? p.cards.length - prevCount : 0;
+          const rouletteCards = isOppRouletteEvent
+            ? gameState.lastRouletteDraw?.cards
+            : undefined;
+          const diff =
+            rawDiff > 0 ? rawDiff : rouletteCards?.length || 1;
+          const isRoulette =
+            isOppRouletteEvent ||
+            lastLog?.text.toLowerCase().includes('roulette') ||
+            lastLog?.text.includes('🎰');
+
+          if (isOppRouletteEvent && gameState.lastRouletteDraw?.id) {
+            lastProcessedRouletteIdRef.current = gameState.lastRouletteDraw.id;
+          }
+
+          const visualOppCount = Math.min(diff, isRoulette ? 12 : 6);
+          const oppStepMs =
+            isRoulette ? (visualOppCount > 7 ? 300 : 360) : 115;
+          const oppDurationMs = visualOppCount * oppStepMs + 660;
+
+          if (rawDiff > 0) {
+            setOppHiddenDrawCounts((prev) => ({
+              ...prev,
+              [p.id]: rawDiff,
+            }));
+          }
+
+          lockAnimation('opponent_draw', oppDurationMs);
           setOpponentDrawFlight({
             id: `opp_${p.id}_${Date.now()}`,
             count: diff,
+            cards: isRoulette ? gameState.lastRouletteDraw?.cards : undefined,
             target: 'opponent',
+            opponentId: p.id,
             opponentName: p.name,
             reason: isRoulette ? 'roulette' : diff > 1 ? 'penalty' : 'normal',
-            label: isRoulette ? `ROULETTE (+${diff})` : diff > 1 ? `+${diff} PENALTY` : undefined,
+            targetColor: isRoulette
+              ? (gameState.lastRouletteDraw?.targetColor || gameState.currentColor).toUpperCase()
+              : undefined,
+            label: isRoulette
+              ? `ROULETTE (+${diff})`
+              : diff > 1
+              ? `+${diff} PENALTY`
+              : undefined,
+            soundEnabled,
           });
-          if (soundEnabled) playSound('swoosh');
-          setTimeout(() => setOpponentDrawFlight(null), 600);
+          if (oppFlightSafetyTimerRef.current) {
+            clearTimeout(oppFlightSafetyTimerRef.current);
+          }
+          oppFlightSafetyTimerRef.current = setTimeout(() => {
+            setOpponentDrawFlight(null);
+            setOppHiddenDrawCounts({});
+            unlockAnimation('opponent_draw');
+          }, visualOppCount * oppStepMs + 750);
         }
       }
     });
 
     prevOpponentCardsRef.current = currentMap;
-  }, [gameState.players, gameState.status, currentUserId, soundEnabled, gameState.logs]);
-
-  const topCard = gameState.discardPile[gameState.discardPile.length - 1] || {
-    id: 'empty',
-    color: 'red',
-    value: '5',
-  };
+  }, [
+    gameState.players,
+    gameState.status,
+    currentUserId,
+    soundEnabled,
+    gameState.logs,
+    isInitialDealing,
+    hasNewSwapInLogs,
+    lockAnimation,
+    unlockAnimation,
+  ]);
 
   const currentPlayer = gameState.players[gameState.currentTurnIndex];
   const isMyTurn =
@@ -404,57 +839,160 @@ export const GameBoard: React.FC<GameBoardProps> = ({
     currentPlayer?.id === currentUserId &&
     !me?.isEliminated;
 
-  const opponents = gameState.players.filter((p) => p.id !== currentUserId);
+  // Turn Arrival Notification: vibration is strictly and exclusively triggered when the user's turn arrives
+  const prevIsMyTurnRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (gameState.status === 'playing') {
+      if (isMyTurn && !prevIsMyTurnRef.current) {
+        triggerHaptic('turn');
+        if (soundEnabled) {
+          playSound('turn');
+        }
+      }
+    }
+    prevIsMyTurnRef.current = isMyTurn;
+  }, [isMyTurn, gameState.status, soundEnabled]);
 
-  // Stack Slam & Flip Animation Listeners
+  // Stack Slam & Opponent Play Flight Listeners
   const prevTopCardIdRef = useRef<string>(topCard.id);
   const prevPenaltyRef = useRef<number>(gameState.activePenalty);
 
+  // Sync settledDiscardCard if chosenColor updates on the same topCard or if no flight is active
+  useEffect(() => {
+    if (
+      topCard.id === settledDiscardCard.id &&
+      topCard.chosenColor !== settledDiscardCard.chosenColor
+    ) {
+      setSettledDiscardCard(topCard);
+    }
+  }, [topCard, settledDiscardCard.id, settledDiscardCard.chosenColor]);
+
+  // Fast-forward and clear any frozen in-flight overlays when returning from a backgrounded mobile tab
+  useEffect(() => {
+    if (tabResumeCount === 0) return;
+    if (initialDealSafetyTimerRef.current) {
+      clearTimeout(initialDealSafetyTimerRef.current);
+      initialDealSafetyTimerRef.current = null;
+    }
+    if (drawFlightSafetyTimerRef.current) {
+      clearTimeout(drawFlightSafetyTimerRef.current);
+      drawFlightSafetyTimerRef.current = null;
+    }
+    if (oppFlightSafetyTimerRef.current) {
+      clearTimeout(oppFlightSafetyTimerRef.current);
+      oppFlightSafetyTimerRef.current = null;
+    }
+    if (playedFlightSafetyTimerRef.current) {
+      clearTimeout(playedFlightSafetyTimerRef.current);
+      playedFlightSafetyTimerRef.current = null;
+    }
+    setActiveDrawFlight(null);
+    setOpponentDrawFlight(null);
+    setPlayedFlight(null);
+    setInitialDeal(null);
+    setInFlightDiscardCardId(null);
+    setDealingHiddenCardIds(new Set());
+    setOppHiddenDrawCounts({});
+    setSettledDiscardCard(topCardRef.current);
+    prevTopCardIdRef.current = topCardRef.current.id;
+    prevMyCardsRef.current = myCards;
+    const currentOppMap = new Map<string, number>();
+    gameState.players.forEach((p) => {
+      if (p.id !== currentUserId) {
+        currentOppMap.set(p.id, p.cards.length);
+      }
+    });
+    prevOpponentCardsRef.current = currentOppMap;
+  }, [tabResumeCount]);
+
   useEffect(() => {
     if (topCard.id !== prevTopCardIdRef.current) {
+      const prevId = prevTopCardIdRef.current;
       prevTopCardIdRef.current = topCard.id;
-      const penalty = getPenaltyAmount(topCard.value);
-      if (
-        penalty > 0 ||
-        ['skip_everyone', 'wild_draw10', 'wild_draw6', 'draw4', 'draw2', 'wild_reverse_draw4'].includes(
-          topCard.value
-        )
-      ) {
-        setSlamEffect(true);
-        if (soundEnabled) playSound('slam');
-        triggerHaptic('stack');
-        const timer = setTimeout(() => setSlamEffect(false), 600);
-        return () => clearTimeout(timer);
+
+      if (isInitialDealing || prevId === 'empty') {
+        setSettledDiscardCard(topCard);
+        return;
       }
-      if (
+
+      const penalty = getPenaltyAmount(topCard.value);
+      const isHeavySlam =
+        penalty > 0 ||
+        [
+          'skip_everyone',
+          'wild_draw10',
+          'wild_draw6',
+          'draw4',
+          'draw2',
+          'wild_reverse_draw4',
+        ].includes(topCard.value);
+
+      const isSpecialCard =
+        isHeavySlam ||
+        topCard.color === 'wild' ||
+        isNaN(Number(topCard.value)) ||
         (topCard.value === '7' && gameState.rules.allow7Swap) ||
-        (topCard.value === '0' && gameState.rules.allow0PassAll)
-      ) {
-        setFlipEffect(true);
-        if (soundEnabled) playSound('flip');
-        triggerHaptic('medium');
-        const timer = setTimeout(() => setFlipEffect(false), 700);
-        return () => clearTimeout(timer);
+        (topCard.value === '0' && gameState.rules.allow0PassAll);
+
+      // If this card was played by an opponent (not the local player and not the initial deal), fly it from their seat
+      if (topCard.id !== lastLocalPlayedCardIdRef.current) {
+        const lastLog = gameState.logs?.[gameState.logs.length - 1];
+        const actorOpp = opponents.find((o) => lastLog?.text.includes(o.name)) || opponents[0];
+        if (actorOpp) {
+          lockAnimation('played_flight', 580);
+          setInFlightDiscardCardId(topCard.id);
+          setPlayedFlight({
+            id: `opp_play_${topCard.id}_${Date.now()}`,
+            card: topCard,
+            source: 'opponent',
+            opponentId: actorOpp.id,
+            isSlam: isHeavySlam,
+            isSpecial: isSpecialCard,
+            soundEnabled,
+          });
+          if (playedFlightSafetyTimerRef.current) {
+            clearTimeout(playedFlightSafetyTimerRef.current);
+          }
+          playedFlightSafetyTimerRef.current = setTimeout(() => {
+            playedFlightSafetyTimerRef.current = null;
+            setSettledDiscardCard(topCardRef.current);
+            setInFlightDiscardCardId((cur) => (cur === topCard.id ? null : cur));
+            setPlayedFlight((prev) => (prev?.card.id === topCard.id ? null : prev));
+            unlockAnimation('played_flight');
+          }, 620);
+        } else {
+          setSettledDiscardCard(topCard);
+        }
+      }
+
+      if (isHeavySlam) {
+        triggerSlamPulse();
       }
     }
-  }, [topCard.id, topCard.value, soundEnabled, gameState.rules.allow7Swap, gameState.rules.allow0PassAll]);
+  }, [
+    topCard,
+    soundEnabled,
+    gameState.rules.allow7Swap,
+    gameState.rules.allow0PassAll,
+    gameState.logs,
+    opponents,
+    isInitialDealing,
+    lockAnimation,
+    unlockAnimation,
+    triggerSlamPulse,
+  ]);
 
   useEffect(() => {
     if (gameState.activePenalty > prevPenaltyRef.current) {
-      setSlamEffect(true);
-      if (soundEnabled) playSound('slam');
-      triggerHaptic('stack');
-      const timer = setTimeout(() => setSlamEffect(false), 600);
-      return () => clearTimeout(timer);
+      triggerSlamPulse();
     }
     prevPenaltyRef.current = gameState.activePenalty;
-  }, [gameState.activePenalty, soundEnabled]);
+  }, [gameState.activePenalty, triggerSlamPulse]);
 
   // Victory Confetti
   useEffect(() => {
     if (gameState.status === 'ended') {
       if (soundEnabled) playSound('win');
-      triggerHaptic('win');
       confetti({
         particleCount: 140,
         spread: 90,
@@ -463,25 +1001,91 @@ export const GameBoard: React.FC<GameBoardProps> = ({
     }
   }, [gameState.status, soundEnabled]);
 
-  // Audio cue when UNO or Mercy log events occur
-  const prevLogIdRef = useRef<string | null>(null);
-  const latestGameLog = gameState.logs?.[gameState.logs.length - 1];
-  useEffect(() => {
-    if (!latestGameLog) return;
-    if (latestGameLog.id && latestGameLog.id !== prevLogIdRef.current) {
-      prevLogIdRef.current = latestGameLog.id;
-      if (latestGameLog.type === 'uno') {
-        if (soundEnabled) playSound('uno');
-        triggerHaptic('uno');
-      } else if (latestGameLog.type === 'mercy') {
-        if (soundEnabled) playSound('mercy');
-        triggerHaptic('mercy');
-      }
+  // Execute play card with 3D flight from player's hand to discard pile
+  const executePlayCard = (card: Card, chosenColor?: CardColor, targetPlayerId?: string) => {
+    // If initial deal is still running and player acts fast, complete it immediately
+    if (initialDeal) {
+      setSettledDiscardCard(topCardRef.current);
+      setDealingHiddenCardIds(new Set());
+      setInitialDeal(null);
+      unlockAnimation('initial_deal');
     }
-  }, [latestGameLog, soundEnabled]);
+
+    const slotEl = document.querySelector(`[data-hand-card-id="${card.id}"]`);
+    const rectObj = slotEl
+      ? slotEl.getBoundingClientRect()
+      : pendingPlayStartRectRef.current || undefined;
+    pendingPlayStartRectRef.current = null;
+
+    const isHeavySlam =
+      getPenaltyAmount(card.value) > 0 ||
+      [
+        'skip_everyone',
+        'wild_draw10',
+        'wild_draw6',
+        'draw4',
+        'draw2',
+        'wild_reverse_draw4',
+      ].includes(card.value);
+
+    const isSpecialCard =
+      isHeavySlam ||
+      card.color === 'wild' ||
+      isNaN(Number(card.value)) ||
+      (card.value === '7' && Boolean(targetPlayerId || gameState.rules.allow7Swap)) ||
+      (card.value === '0' && gameState.rules.allow0PassAll);
+
+    const finalPlayedCard: Card = {
+      ...card,
+      chosenColor: chosenColor || card.chosenColor,
+    };
+
+    lastLocalPlayedCardIdRef.current = card.id;
+    lockAnimation('played_flight', 580);
+    setInFlightDiscardCardId(card.id);
+    setPlayedFlight({
+      id: `me_play_${card.id}_${Date.now()}`,
+      card: finalPlayedCard,
+      source: 'me',
+      startRect: rectObj
+        ? {
+            left: rectObj.left,
+            top: rectObj.top,
+            width: rectObj.width,
+            height: rectObj.height,
+          }
+        : undefined,
+      isSlam: isHeavySlam,
+      isSpecial: isSpecialCard,
+      soundEnabled,
+    });
+    if (playedFlightSafetyTimerRef.current) {
+      clearTimeout(playedFlightSafetyTimerRef.current);
+    }
+    playedFlightSafetyTimerRef.current = setTimeout(() => {
+      playedFlightSafetyTimerRef.current = null;
+      setSettledDiscardCard(topCardRef.current);
+      setInFlightDiscardCardId((cur) => (cur === card.id ? null : cur));
+      setPlayedFlight((prev) => (prev?.card.id === card.id ? null : prev));
+      unlockAnimation('played_flight');
+    }, 620);
+
+    onPlayCard(card, chosenColor, targetPlayerId);
+  };
 
   // Handle card click from player's hand
   const handleCardClick = (card: Card) => {
+    const slotEl = document.querySelector(`[data-hand-card-id="${card.id}"]`);
+    if (slotEl) {
+      const r = slotEl.getBoundingClientRect();
+      pendingPlayStartRectRef.current = {
+        left: r.left,
+        top: r.top,
+        width: r.width,
+        height: r.height,
+      };
+    }
+
     if (!isMyTurn) {
       // Check if eligible for jump-in
       if (
@@ -490,13 +1094,11 @@ export const GameBoard: React.FC<GameBoardProps> = ({
         isExactMatchForJumpIn(card, topCard)
       ) {
         if (soundEnabled) playSound('jumpin');
-        triggerHaptic('jumpin');
-        onPlayCard(card);
+        executePlayCard(card);
         return;
       }
       showToastHint("⏳ Wait for your turn! (Or Jump-In with an identical card)");
       if (soundEnabled) playSound('alert');
-      triggerHaptic('alert');
       return;
     }
 
@@ -515,7 +1117,6 @@ export const GameBoard: React.FC<GameBoardProps> = ({
           `💥 Penalty active (+${gameState.activePenalty})! Stack a Draw card (+2, +4, +6, +10) or click 'Take Penalty'.`
         );
         if (soundEnabled) playSound('alert');
-        triggerHaptic('alert');
         return;
       }
     }
@@ -535,13 +1136,11 @@ export const GameBoard: React.FC<GameBoardProps> = ({
         `⛔ Can't play this card! Must match active color (${gameState.currentColor.toUpperCase()}), symbol, or play Wild.`
       );
       if (soundEnabled) playSound('alert');
-      triggerHaptic('alert');
       return;
     }
 
     // Check if card is Wild (requires color choice)
     if (card.color === 'wild' || isWildCard(card.value)) {
-      triggerHaptic('light');
       setSelectedWildCard(card);
       return;
     }
@@ -551,54 +1150,39 @@ export const GameBoard: React.FC<GameBoardProps> = ({
       const activeOpps = opponents.filter((p) => !p.isEliminated);
       if (gameState.rules.allow7Swap && activeOpps.length === 1) {
         // Only 1 opponent with mandatory rule: auto-swap directly
-        if (soundEnabled) playSound('play');
-        triggerHaptic('play');
-        onPlayCard(card, undefined, activeOpps[0].id);
+        executePlayCard(card, undefined, activeOpps[0].id);
         return;
       }
       if (activeOpps.length > 0) {
-        triggerHaptic('light');
         setSelected7Card(card);
         return;
       }
     }
 
-    if (soundEnabled) playSound('play');
-    triggerHaptic('play');
-    onPlayCard(card);
+    executePlayCard(card);
   };
 
   // Draw card with deal animation
   const handleDrawCard = () => {
     if (!isMyTurn) return;
-    if (soundEnabled) playSound('swoosh');
-    triggerHaptic('draw');
-    setShowDrawFly(true);
-    setTimeout(() => setShowDrawFly(false), 500);
     onDrawCard();
   };
 
   const handleChooseColor = (color: CardColor) => {
     if (!selectedWildCard) return;
-    if (soundEnabled) playSound('play');
-    triggerHaptic('play');
-    onPlayCard(selectedWildCard, color);
+    executePlayCard(selectedWildCard, color);
     setSelectedWildCard(null);
   };
 
   const handleChooseSwapTarget = (targetPlayerId: string) => {
     if (!selected7Card) return;
-    if (soundEnabled) playSound('play');
-    triggerHaptic('play');
-    onPlayCard(selected7Card, undefined, targetPlayerId);
+    executePlayCard(selected7Card, undefined, targetPlayerId);
     setSelected7Card(null);
   };
 
   const handlePlay7WithoutSwap = () => {
     if (!selected7Card) return;
-    if (soundEnabled) playSound('play');
-    triggerHaptic('play');
-    onPlayCard(selected7Card, undefined, undefined);
+    executePlayCard(selected7Card, undefined, undefined);
     setSelected7Card(null);
   };
 
@@ -665,29 +1249,33 @@ export const GameBoard: React.FC<GameBoardProps> = ({
   return (
     <div className="h-[100dvh] w-full max-w-full overflow-hidden p-1 sm:p-2 bg-[#08080c] select-none relative box-border flex flex-col justify-between">
       {/* Top Combat Command Header Bar */}
-      <header className="clip-chamfer-lg bg-[#0e0d12] border-2 border-neutral-800 z-20 px-2.5 sm:px-3.5 py-1.5 shrink-0 shadow-[4px_4px_0px_#000] flex items-center justify-between gap-2 w-full">
-        {/* Left: Arena Identity & Play Direction */}
-        <div className="flex items-center space-x-2 shrink-0">
-          <div className="flex items-center space-x-1.5">
-            <span className="w-2.5 h-2.5 bg-red-600 border border-red-400 shrink-0 animate-pulse" />
-            <span className="font-display font-black text-sm uppercase tracking-wider text-white truncate max-w-[90px] xs:max-w-[130px] sm:max-w-[200px]">
+      <header className="clip-chamfer-lg bg-[#0e0d12] border-2 border-neutral-800 z-20 px-2 sm:px-3.5 py-1.5 shrink-0 shadow-[4px_4px_0px_#000] flex items-center justify-between gap-1.5 sm:gap-2 w-full">
+        {/* Left: Play Direction & Arena Identity (Room Name hidden on mobile vertical to prevent cutoff) */}
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 min-w-0">
+          <div
+            className={`${
+              isLandscapeMobile ? 'flex' : 'hidden sm:flex'
+            } items-center gap-1.5 min-w-0`}
+          >
+            <span className="w-2 h-2 sm:w-2.5 sm:h-2.5 bg-red-600 border border-red-400 shrink-0 animate-pulse" />
+            <span className="font-display font-black text-xs sm:text-sm uppercase tracking-wider text-white truncate max-w-[130px] md:max-w-[200px] leading-none">
               {gameState.roomName}
             </span>
           </div>
 
           <div
-            className="hidden xs:flex items-center space-x-1 px-2 py-0.5 clip-chamfer-btn bg-[#141219] border border-neutral-700 text-[10px] font-mono-hud text-neutral-300 font-bold shrink-0"
+            className="inline-flex items-center justify-center gap-1 h-7 px-2 clip-chamfer-btn bg-[#141219] border border-neutral-700 text-[10px] font-mono-hud text-neutral-300 font-bold shrink-0 leading-none"
             title={`Direction: ${gameState.direction === 1 ? 'Clockwise' : 'Counter-Clockwise'}`}
           >
             <RotateCcw
-              className={`w-3 h-3 text-red-400 ${gameState.direction === -1 ? '-scale-x-100' : ''}`}
+              className={`w-3.5 h-3.5 text-red-400 shrink-0 ${gameState.direction === -1 ? '-scale-x-100' : ''}`}
             />
-            <span className="hidden sm:inline uppercase">{gameState.direction === 1 ? 'CW' : 'CCW'}</span>
+            <span className="uppercase">{gameState.direction === 1 ? 'CW' : 'CCW'}</span>
           </div>
 
           {gameState.rules.mercyLimit > 0 && (
             <span
-              className="font-mono-hud text-[10px] font-black px-2 py-0.5 clip-chamfer-btn bg-red-950/80 text-red-300 border border-red-800 hidden md:inline-block uppercase tracking-wider"
+              className="font-mono-hud text-[10px] font-black h-7 px-2 clip-chamfer-btn bg-red-950/80 text-red-300 border border-red-800 hidden md:inline-flex items-center justify-center uppercase tracking-wider leading-none shrink-0"
               title="Players holding 25+ cards are instantly knocked out"
             >
               MERCY: {gameState.rules.mercyLimit}
@@ -696,7 +1284,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({
         </div>
 
         {/* Center: Turn Status & Isolated Smooth Timer */}
-        <div className="flex items-center space-x-1.5 shrink-0">
+        <div className="flex items-center justify-center shrink-0 min-w-0">
           <TurnTimerBadge
             isMyTurn={isMyTurn}
             currentPlayerName={currentPlayer?.name}
@@ -708,7 +1296,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({
         </div>
 
         {/* Right: Actions, Fullscreen, Sound & Chat Drawer */}
-        <div className="flex items-center space-x-1 sm:space-x-1.5 shrink-0 font-mono-hud text-xs">
+        <div className="flex items-center gap-1 sm:gap-1.5 shrink-0 font-mono-hud text-xs">
           {/* Share Room Button */}
           <button
             type="button"
@@ -730,7 +1318,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({
               setLinkCopied(true);
               setTimeout(() => setLinkCopied(false), 2000);
             }}
-            className="btn-stamp-secondary clip-chamfer-btn p-1.5 bg-[#141219] hover:bg-[#1f1b26] border border-neutral-700 text-neutral-300 transition-colors cursor-pointer hidden md:block"
+            className="btn-stamp-secondary clip-chamfer-btn w-7 h-7 bg-[#141219] hover:bg-[#1f1b26] border border-neutral-700 text-neutral-300 transition-colors cursor-pointer hidden md:inline-flex items-center justify-center"
             title="Share Lobby Link"
           >
             {linkCopied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Share2 className="w-3.5 h-3.5 text-amber-400" />}
@@ -740,10 +1328,10 @@ export const GameBoard: React.FC<GameBoardProps> = ({
           <button
             type="button"
             onClick={onOpenReferee}
-            className="btn-stamp-secondary clip-chamfer-btn hidden lg:flex items-center space-x-1 px-2.5 py-1 bg-[#141219] hover:bg-[#1f1b26] border border-neutral-700 text-amber-300 font-bold transition-all cursor-pointer uppercase"
+            className="btn-stamp-secondary clip-chamfer-btn hidden lg:inline-flex items-center justify-center gap-1.5 h-7 px-2.5 bg-[#141219] hover:bg-[#1f1b26] border border-neutral-700 text-amber-300 font-bold transition-all cursor-pointer uppercase leading-none"
             title="Combat Handbook"
           >
-            <BookOpen className="w-3.5 h-3.5 text-amber-400" />
+            <BookOpen className="w-3.5 h-3.5 text-amber-400 shrink-0" />
             <span>Handbook</span>
           </button>
 
@@ -751,7 +1339,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({
           <button
             type="button"
             onClick={onOpenRules}
-            className="btn-stamp-secondary clip-chamfer-btn p-1.5 bg-[#141219] hover:bg-[#1f1b26] border border-neutral-700 text-neutral-300 transition-colors cursor-pointer hidden md:block"
+            className="btn-stamp-secondary clip-chamfer-btn w-7 h-7 bg-[#141219] hover:bg-[#1f1b26] border border-neutral-700 text-neutral-300 transition-colors cursor-pointer hidden md:inline-flex items-center justify-center"
             title="Official Rulebook"
           >
             <HelpCircle className="w-3.5 h-3.5" />
@@ -761,7 +1349,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({
           <button
             type="button"
             onClick={toggleFullscreen}
-            className={`btn-stamp-secondary clip-chamfer-btn p-1.5 transition-all cursor-pointer flex items-center gap-1 ${
+            className={`btn-stamp-secondary clip-chamfer-btn w-7 h-7 transition-all cursor-pointer inline-flex items-center justify-center ${
               !isFullscreen
                 ? 'bg-[#1a1524] text-amber-300 border border-amber-500/60'
                 : 'bg-[#141219] text-amber-400 border border-neutral-700'
@@ -774,8 +1362,12 @@ export const GameBoard: React.FC<GameBoardProps> = ({
           {/* Sound Toggle */}
           <button
             type="button"
-            onClick={() => setSoundEnabled(!soundEnabled)}
-            className="btn-stamp-secondary clip-chamfer-btn p-1.5 bg-[#141219] hover:bg-[#1f1b26] border border-neutral-700 text-neutral-300 transition-colors cursor-pointer"
+            onClick={() => {
+              const next = !soundEnabled;
+              if (!next) stopCardAnimationSounds(0.015);
+              setSoundEnabled(next);
+            }}
+            className="btn-stamp-secondary clip-chamfer-btn w-7 h-7 bg-[#141219] hover:bg-[#1f1b26] border border-neutral-700 text-neutral-300 transition-colors cursor-pointer inline-flex items-center justify-center"
             title={soundEnabled ? 'Mute' : 'Unmute'}
           >
             {soundEnabled ? <Volume2 className="w-3.5 h-3.5 text-neutral-300" /> : <VolumeX className="w-3.5 h-3.5 text-neutral-500" />}
@@ -785,17 +1377,17 @@ export const GameBoard: React.FC<GameBoardProps> = ({
           <button
             type="button"
             onClick={() => setShowChatDrawer(!showChatDrawer)}
-            className={`btn-stamp-secondary clip-chamfer-btn relative flex items-center space-x-1.5 px-2.5 py-1 font-bold uppercase transition-all cursor-pointer ${
+            className={`btn-stamp-secondary clip-chamfer-btn relative inline-flex items-center justify-center gap-1.5 h-7 px-2 sm:px-2.5 font-bold uppercase transition-all cursor-pointer leading-none ${
               showChatDrawer
                 ? 'bg-red-600 text-white border-red-500 shadow-[2px_2px_0px_#000]'
                 : 'bg-[#141219] hover:bg-[#1f1b26] text-neutral-200 border border-neutral-700'
             }`}
             title="Toggle In-Game Chat"
           >
-            <MessageSquare className="w-3.5 h-3.5 text-red-400" />
+            <MessageSquare className="w-3.5 h-3.5 text-red-400 shrink-0" />
             <span className="hidden sm:inline">Feed</span>
             {unreadChatCount > 0 && !showChatDrawer && (
-              <span className="px-1.5 py-0.2 bg-red-500 text-white clip-chamfer-btn text-[9px] font-black font-mono">
+              <span className="px-1 py-0.5 bg-red-500 text-white clip-chamfer-btn text-[9px] font-black font-mono leading-none">
                 {unreadChatCount}
               </span>
             )}
@@ -805,7 +1397,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({
           <button
             type="button"
             onClick={() => setShowLeaveConfirm(true)}
-            className="btn-stamp-secondary clip-chamfer-btn p-1.5 bg-red-950/70 hover:bg-red-900 border border-red-800 text-red-400 hover:text-white transition-colors cursor-pointer"
+            className="btn-stamp-secondary clip-chamfer-btn w-7 h-7 bg-red-950/70 hover:bg-red-900 border border-red-800 text-red-400 hover:text-white transition-colors cursor-pointer inline-flex items-center justify-center"
             title="Exit Match"
           >
             <LogOut className="w-3.5 h-3.5" />
@@ -819,6 +1411,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({
           gameState={gameState}
           currentUserId={currentUserId}
           topCard={topCard}
+          settledDiscardCard={settledDiscardCard}
           myCards={myCards}
           sortedCards={sortedCards}
           isMyTurn={isMyTurn}
@@ -827,8 +1420,13 @@ export const GameBoard: React.FC<GameBoardProps> = ({
           handleCardClick={handleCardClick}
           slamEffect={slamEffect}
           flipEffect={flipEffect}
+          swapBannerText={swapBannerText}
           activeDrawFlight={activeDrawFlight}
           newlyDrawnCardIds={newlyDrawnCardIds}
+          dealingHiddenCardIds={effectiveDealingHiddenCardIds}
+          oppHiddenDrawCounts={effectiveOppHiddenDrawCounts}
+          inFlightDiscardCardId={inFlightDiscardCardId}
+          isInitialDealing={isInitialDealing}
           onCallUno={onCallUno}
           onCatchUno={onCatchUno}
           onSendTaunt={onSendTaunt}
@@ -847,21 +1445,33 @@ export const GameBoard: React.FC<GameBoardProps> = ({
           >
             {opponents.map((opp) => {
               const isOppTurn = gameState.players[gameState.currentTurnIndex]?.id === opp.id;
-              const isDanger = opp.cards.length >= (gameState.rules.mercyLimit || 25) - 3;
+              const mercyLimit = gameState.rules.mercyLimit || 25;
+              const hiddenOppDraws = effectiveOppHiddenDrawCounts[opp.id] || 0;
+              const displayedOppCards = Math.max(0, opp.cards.length - hiddenOppDraws);
+              const mercyRatio = displayedOppCards / mercyLimit;
+              const isDanger = !opp.isEliminated && (mercyRatio >= 0.8 || displayedOppCards >= mercyLimit - 4);
+              const isWarning = !opp.isEliminated && !isDanger && mercyRatio >= 0.6;
               const oppTaunts = (gameState.activeTaunts || []).filter((t) => t.playerId === opp.id);
 
               return (
                 <div
                   key={opp.id}
-                  className={`relative px-2.5 py-1.5 h-11 sm:h-12 clip-chamfer border transition-all flex items-center space-x-2 shrink-0 shadow-[2px_2px_0px_#000] ${
+                  data-opponent-id={opp.id}
+                  className={`relative px-2.5 py-1.5 h-11 sm:h-12 clip-chamfer border transition-colors flex items-center space-x-2 shrink-0 shadow-[2px_2px_0px_#000] ${
                     opp.isEliminated
                       ? 'bg-[#0a0a0d] border-neutral-800 opacity-40 grayscale'
+                      : isOppTurn && isDanger
+                      ? 'bg-red-950/90 border-2 border-red-500 ring-2 ring-amber-400/80'
                       : isOppTurn
                       ? 'bg-red-950/80 border-red-500 ring-1 ring-red-500/60'
+                      : isDanger
+                      ? 'bg-red-950/45 border-2 border-red-500 ring-1 ring-red-500/50'
+                      : isWarning
+                      ? 'bg-amber-950/30 border border-amber-500/80'
                       : 'bg-[#141219] border-neutral-800 hover:border-neutral-700'
                   }`}
                 >
-                  <TableTauntFloating taunts={oppTaunts} placement="overlay" />
+                  <TableTauntFloating taunts={oppTaunts} placement="bottom" />
 
                   <MercyDangerMeter
                     player={opp}
@@ -902,11 +1512,15 @@ export const GameBoard: React.FC<GameBoardProps> = ({
                       ) : (
                         <span
                           className={`flex items-center gap-0.5 ${
-                            isDanger ? 'text-red-400 font-black animate-pulse' : 'text-neutral-400'
+                            isDanger
+                              ? 'px-1.5 py-0.2 rounded bg-red-950/90 border border-red-500 text-red-300 font-black animate-pulse'
+                              : isWarning
+                              ? 'px-1.5 py-0.2 rounded bg-amber-950/80 border border-amber-500/80 text-amber-300 font-black'
+                              : 'text-neutral-400'
                           }`}
                         >
                           <Layers className="w-2.5 h-2.5" />
-                          <span>{opp.cards.length}/{gameState.rules.mercyLimit || 25}</span>
+                          <span>{displayedOppCards}/{mercyLimit}</span>
                         </span>
                       )}
                     </div>
@@ -916,82 +1530,78 @@ export const GameBoard: React.FC<GameBoardProps> = ({
             })}
           </div>
 
-          {/* Center Table Arena (Discard Pile, Draw Deck, Active Stacking Alarm) */}
+          {/* Center Table Arena (Discard Pile, Draw Deck, Fixed Event Banner below) */}
           <div className="flex-1 flex flex-col items-center justify-center relative z-10 py-1 min-h-[190px] sm:min-h-[230px] my-auto">
-            {/* Active Stacking Penalty Alarm Banner */}
-            {gameState.activePenalty > 0 && (
-              <div className="mb-3 px-3.5 py-1 clip-chamfer bg-gradient-to-r from-red-600 to-amber-600 text-white font-mono-hud font-black text-xs tracking-wider uppercase flex items-center space-x-1.5 shadow-[4px_4px_0px_#000] border-2 border-amber-300 animate-pulse shrink-0">
-                <Flame className="w-4 h-4 text-amber-300" />
-                <span>+{gameState.activePenalty} PENALTY STACK ACTIVE</span>
-              </div>
-            )}
-
-            {/* 7-Swap or 0-Pass Event Flash Banner */}
-            {flipEffect && (
-              <div className="mb-2 px-3 py-1 clip-chamfer bg-amber-400 text-black font-display font-black text-xs uppercase tracking-wider flex items-center space-x-2 shadow-[3px_3px_0px_#000] border-2 border-white shrink-0 animate-bounce">
-                <Sparkles className="w-4 h-4 text-black" />
-                <span>{topCard.value === '7' ? '🔄 7s MANDATORY HAND SWAP!' : '🔁 0s PASS ALL HANDS!'}</span>
-              </div>
-            )}
-
-            {/* Central Piles: Draw Deck & Discard Pile */}
+            {/* Central Piles: Draw Deck & Discard Pile (Anchored Position, Zero Layout Shifts) */}
             <div className="flex items-center justify-center gap-6 sm:gap-12 relative">
-              {/* Draw Pile */}
+              {/* Draw Pile (3D Physical Dealer Stack) */}
               <div className="flex flex-col items-center relative">
-                <motion.button
-                  id="uno-draw-deck"
-                  type="button"
-                  onClick={handleDrawCard}
-                  disabled={!isMyTurn}
-                  whileHover={isMyTurn ? { scale: 1.04 } : undefined}
-                  whileTap={isMyTurn ? { scale: 0.96 } : undefined}
-                  style={{ transform: 'translate3d(0, 0, 0)' }}
-                  className={`group relative clip-chamfer-btn transition-all duration-150 ${
-                    isMyTurn
-                      ? 'cursor-pointer border-2 border-red-500 ring-2 ring-red-500/70 shadow-[4px_4px_0px_#000]'
-                      : 'border border-neutral-700 opacity-90'
-                  }`}
-                  title={isMyTurn ? 'Your Turn: Click to draw a card' : 'Draw Pile'}
-                >
-                  <UnoCard
-                    card={{ id: 'back', color: 'wild', value: 'wild' }}
-                    showBack
-                    size={isShortHeight ? 'md' : 'lg'}
+                <div className="relative">
+                  {/* 3D Stack Depth Layers beneath top card */}
+                  <div
+                    aria-hidden="true"
+                    className="absolute inset-0 translate-x-[6px] translate-y-[6px] rounded-2xl bg-[#060609] border border-neutral-800 shadow-[4px_4px_0px_#000] pointer-events-none"
                   />
-                  <div className="absolute -bottom-2 inset-x-0 flex justify-center">
-                    <span className={`px-2.5 py-0.5 clip-chamfer-btn border font-mono-hud text-[10px] font-black uppercase shadow-md transition-colors ${
+                  <div
+                    aria-hidden="true"
+                    className="absolute inset-0 translate-x-[4px] translate-y-[4px] rounded-2xl bg-[#0a0a0f] border border-neutral-700/80 pointer-events-none"
+                  />
+                  <div
+                    aria-hidden="true"
+                    className="absolute inset-0 translate-x-[2px] translate-y-[2px] rounded-2xl bg-[#0e0e15] border border-neutral-700 pointer-events-none"
+                  />
+
+                  <motion.button
+                    id="uno-draw-deck"
+                    type="button"
+                    onClick={handleDrawCard}
+                    disabled={!isMyTurn}
+                    whileHover={isMyTurn ? { scale: 1.04 } : undefined}
+                    whileTap={isMyTurn ? { scale: 0.96 } : undefined}
+                    style={{ transform: 'translate3d(0, 0, 0)' }}
+                    className={`group relative clip-chamfer-btn transition-colors duration-150 ${
                       isMyTurn
-                        ? 'bg-red-950 border-red-500 text-red-300'
-                        : 'bg-neutral-900 border-neutral-700 text-amber-300'
-                    }`}>
-                      {gameState.drawPileCount} DECK
-                    </span>
-                  </div>
-                </motion.button>
+                        ? 'cursor-pointer border-2 border-red-500 ring-2 ring-red-500/70 shadow-[4px_4px_0px_#000]'
+                        : 'border border-neutral-700 opacity-95'
+                    }`}
+                    title={isMyTurn ? 'Your Turn: Click to draw a card' : 'Draw Pile'}
+                  >
+                    <UnoCard
+                      card={{ id: 'back', color: 'wild', value: 'wild' }}
+                      showBack
+                      size={isShortHeight ? 'md' : 'lg'}
+                    />
+                    <div className="absolute -bottom-2 inset-x-0 flex justify-center">
+                      <span className={`px-2.5 py-0.5 clip-chamfer-btn border font-mono-hud text-[10px] font-black uppercase shadow-md transition-colors ${
+                        isMyTurn
+                          ? 'bg-red-950 border-red-500 text-red-300'
+                          : 'bg-neutral-900 border-neutral-700 text-amber-300'
+                      }`}>
+                        {gameState.drawPileCount} DECK
+                      </span>
+                    </div>
+                  </motion.button>
+                </div>
 
                 <span className="mt-2.5 font-mono-hud text-[10px] font-bold text-neutral-400 uppercase tracking-wider">
                   Draw Pile
                 </span>
               </div>
 
-              {/* Discard Pile */}
+              {/* Discard Pile (Clean Solid Single Card) */}
               <div className="flex flex-col items-center relative">
-                <motion.div
-                  animate={
-                    slamEffect
-                      ? { scale: [1, 1.25, 0.95, 1], rotate: [0, -8, 6, 0] }
-                      : flipEffect
-                      ? { rotateY: [0, 180, 360] }
-                      : {}
-                  }
-                  transition={{ duration: 0.45, ease: 'easeOut' }}
-                  className="relative"
-                >
-                  <UnoCard card={topCard} size={isShortHeight ? 'md' : 'lg'} disabled />
+                <div id="uno-discard-pile" className="relative">
+                  <div className={isInitialDealing ? 'invisible' : 'visible'}>
+                    <UnoCard
+                      card={settledDiscardCard}
+                      size={isShortHeight ? 'md' : 'lg'}
+                      disabled
+                    />
+                  </div>
 
                   {/* Active Color Ring */}
                   <div
-                    className={`absolute -inset-1.5 clip-chamfer -z-10 border-2 transition-all duration-300 blur-[2px] ${
+                    className={`absolute -inset-1.5 clip-chamfer -z-10 border-2 transition-colors duration-300 blur-[2px] ${
                       gameState.currentColor === 'red'
                         ? 'border-red-500 shadow-[0_0_20px_#ff1f35]'
                         : gameState.currentColor === 'blue'
@@ -1001,7 +1611,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({
                         : 'border-amber-400 shadow-[0_0_20px_#ffcc00]'
                     }`}
                   />
-                </motion.div>
+                </div>
 
                 <div className="mt-2.5 flex items-center space-x-1 font-mono-hud text-[10px] font-bold">
                   <span className="text-neutral-400 uppercase">COLOR:</span>
@@ -1022,7 +1632,27 @@ export const GameBoard: React.FC<GameBoardProps> = ({
               </div>
             </div>
 
-            {/* Card Hint Toast Notification */}
+            {/* Dedicated Fixed Layout Event Strip (Zero Layout Shifts) */}
+            <div className="h-8 min-h-[2rem] w-full max-w-sm flex items-center justify-center mt-2.5 px-2">
+              {isInitialDealing ? (
+                <div className="px-3.5 py-0.5 clip-chamfer bg-[#141219] text-amber-300 font-mono-hud font-black text-xs tracking-wider uppercase flex items-center space-x-1.5 shadow-[3px_3px_0px_#000] border border-amber-400">
+                  <Layers className="w-3.5 h-3.5 text-amber-400 animate-spin" />
+                  <span>DEALING STARTING HANDS</span>
+                </div>
+              ) : gameState.activePenalty > 0 ? (
+                <div className="px-3.5 py-0.5 clip-chamfer bg-gradient-to-r from-red-600 to-amber-600 text-white font-mono-hud font-black text-xs tracking-wider uppercase flex items-center space-x-1.5 shadow-[3px_3px_0px_#000] border-2 border-amber-300 animate-pulse">
+                  <Flame className="w-3.5 h-3.5 text-amber-300" />
+                  <span>+{gameState.activePenalty} PENALTY STACK ACTIVE</span>
+                </div>
+              ) : flipEffect ? (
+                <div className="px-3 py-0.5 clip-chamfer bg-amber-400 text-black font-display font-black text-xs uppercase tracking-wider flex items-center space-x-2 shadow-[2px_2px_0px_#000] border-2 border-white animate-bounce">
+                  <Sparkles className="w-3.5 h-3.5 text-black" />
+                  <span>{swapBannerText}</span>
+                </div>
+              ) : null}
+            </div>
+
+            {/* Card Hint Toast Notification (Absolute Overlay, Zero Reflow) */}
             {cardHint && (
               <div className="absolute top-2 inset-x-0 flex justify-center z-40 px-4 pointer-events-none animate-fadeIn font-mono-hud">
                 <div className="bg-[#181216] border-2 border-red-600 text-red-200 px-3.5 py-1.5 clip-chamfer shadow-[4px_4px_0px_#000] text-xs font-bold flex items-center space-x-2">
@@ -1082,7 +1712,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({
 
                     <div className="flex items-center space-x-1.5">
                       <span className="font-display font-black text-sm text-white uppercase tracking-wide">
-                        Your Hand ({myCards.length})
+                        Your Hand ({displayedMyCardCount})
                       </span>
                       {canScrollRight && (
                         <button
@@ -1097,12 +1727,12 @@ export const GameBoard: React.FC<GameBoardProps> = ({
                       {gameState.rules.mercyLimit > 0 && (
                         <span
                           className={`text-[10px] font-black px-2 py-0.5 clip-chamfer-btn border ${
-                            myCards.length >= gameState.rules.mercyLimit - 4
+                            displayedMyCardCount >= gameState.rules.mercyLimit - 4
                               ? 'bg-red-950 text-red-300 border-red-600 animate-pulse'
                               : 'bg-neutral-900 text-neutral-400 border-neutral-800'
                           }`}
                         >
-                          MERCY: {myCards.length}/{gameState.rules.mercyLimit}
+                          MERCY: {displayedMyCardCount}/{gameState.rules.mercyLimit}
                         </span>
                       )}
                     </div>
@@ -1128,10 +1758,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({
                         <button
                           key={target.id}
                           type="button"
-                          onClick={() => {
-                            triggerHaptic('penalty');
-                            onCatchUno?.(target.id);
-                          }}
+                          onClick={() => onCatchUno?.(target.id)}
                           className="btn-stamp-slam clip-chamfer-btn px-2.5 py-1 bg-red-600 hover:bg-red-500 text-white font-display font-black text-xs uppercase border border-amber-300 shadow-[2px_2px_0px_#000] cursor-pointer flex items-center gap-1"
                         >
                           🚨 CATCH {target.name.split(' ')[0]}!
@@ -1158,10 +1785,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({
                         return (
                           <button
                             type="button"
-                            onClick={() => {
-                              triggerHaptic('uno');
-                              onCallUno();
-                            }}
+                            onClick={onCallUno}
                             className="btn-stamp-slam clip-chamfer-btn px-3 py-1 bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-500 text-black font-display font-black text-xs uppercase tracking-wider border-2 border-white shadow-[2px_2px_0px_#000] cursor-pointer animate-pulse"
                           >
                             📢 SHOUT UNO!
@@ -1234,6 +1858,9 @@ export const GameBoard: React.FC<GameBoardProps> = ({
                           isPlayable={playable}
                           isJumpInPlayable={jumpInEligible}
                           isNewlyDrawn={newlyDrawnCardIds.has(card.id)}
+                          isDealingHidden={
+                            isPendingInitialDeal || effectiveDealingHiddenCardIds.has(card.id)
+                          }
                           size={isShortHeight ? 'sm' : 'md'}
                           onCardClick={handleCardClick}
                         />
@@ -1260,274 +1887,47 @@ export const GameBoard: React.FC<GameBoardProps> = ({
         </main>
       )}
 
-      {/* Floating In-Game Chat Drawer Modal */}
-      {showChatDrawer && (
-        <div className="fixed bottom-3 right-3 sm:bottom-4 sm:right-4 z-50 w-80 sm:w-96 max-w-[92vw] h-[70vh] sm:h-[75vh] flex flex-col clip-chamfer-lg bg-[#0e0d12] border-2 border-neutral-700 shadow-[6px_6px_0px_#000] overflow-hidden animate-fadeIn">
-          <div className="flex items-center justify-between px-3.5 py-2.5 bg-[#141219] border-b-2 border-neutral-800 font-mono-hud">
-            <div className="flex items-center space-x-2 text-xs font-bold text-white">
-              <MessageSquare className="w-4 h-4 text-red-500" />
-              <span className="uppercase">Combat Transmissions</span>
-            </div>
-            <button
-              type="button"
-              onClick={() => setShowChatDrawer(false)}
-              className="btn-stamp-secondary clip-chamfer-btn p-1 text-neutral-400 hover:text-white bg-neutral-900 border border-neutral-700 transition-colors cursor-pointer"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
+      {/* Modular In-Game Modals, Killcam, & Match Summary Overlay */}
+      <GameBoardModals
+        gameState={gameState}
+        currentUserId={currentUserId}
+        opponents={opponents}
+        showChatDrawer={showChatDrawer}
+        setShowChatDrawer={setShowChatDrawer}
+        chatMessages={chatMessages}
+        onSendMessage={onSendMessage}
+        selectedWildCard={selectedWildCard}
+        setSelectedWildCard={setSelectedWildCard}
+        onChooseColor={handleChooseColor}
+        selected7Card={selected7Card}
+        setSelected7Card={setSelected7Card}
+        onChooseSwapTarget={handleChooseSwapTarget}
+        onPlay7WithoutSwap={handlePlay7WithoutSwap}
+        dismissedKillcamId={dismissedKillcamId}
+        setDismissedKillcamId={setDismissedKillcamId}
+        showLeaveConfirm={showLeaveConfirm}
+        setShowLeaveConfirm={setShowLeaveConfirm}
+        onReturnToLobby={onReturnToLobby}
+        onRestartGame={onRestartGame}
+        onLeaveGame={onLeaveGame}
+      />
 
-          <div className="flex-1 overflow-hidden p-2">
-            <ChatPanel
-              messages={chatMessages}
-              onSendMessage={onSendMessage}
-              currentUserId={currentUserId}
-              isGameActive
-            />
-          </div>
-        </div>
-      )}
-
-      {/* Wild Color Selection Modal */}
-      {selectedWildCard && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fadeIn">
-          <div className="clip-chamfer-lg bg-[#0e0d12] border-2 border-neutral-700 p-5 sm:p-6 w-full max-w-sm text-center shadow-[8px_8px_0px_#000] space-y-4">
-            <div className="space-y-1">
-              <h3 className="font-display font-black text-xl uppercase tracking-wider text-white">
-                Choose Wild Color
-              </h3>
-              <p className="font-mono-hud text-[11px] text-neutral-400">
-                Designate the active combat color to continue play:
-              </p>
-            </div>
-            <div className="grid grid-cols-2 gap-2.5 pt-1 font-mono-hud">
-              {[
-                { color: 'red', label: 'Red', bg: 'bg-red-600 hover:bg-red-500 text-white border-red-400' },
-                { color: 'blue', label: 'Blue', bg: 'bg-sky-600 hover:bg-sky-500 text-white border-sky-400' },
-                { color: 'green', label: 'Green', bg: 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400' },
-                { color: 'yellow', label: 'Yellow', bg: 'bg-amber-400 hover:bg-amber-300 text-black border-yellow-200' },
-              ].map((c) => (
-                <button
-                  key={c.color}
-                  type="button"
-                  onClick={() => handleChooseColor(c.color as CardColor)}
-                  className={`btn-stamp-slam clip-chamfer-btn p-3 font-display font-black text-sm uppercase tracking-wider border shadow-[3px_3px_0px_#000] cursor-pointer ${c.bg}`}
-                >
-                  {c.label}
-                </button>
-              ))}
-            </div>
-            <button
-              type="button"
-              onClick={() => setSelectedWildCard(null)}
-              className="btn-stamp-secondary clip-chamfer-btn w-full py-2 bg-neutral-900 hover:bg-neutral-800 text-neutral-400 hover:text-white font-mono-hud font-bold text-xs border border-neutral-700 transition-colors cursor-pointer uppercase"
-            >
-              Cancel (Pick a Different Card)
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* 7s Hand Swap Modal (Mandatory or Optional based on Lobby Rules) */}
-      {selected7Card && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fadeIn">
-          <div className="clip-chamfer-lg bg-[#0e0d12] border-2 border-amber-500/80 p-5 sm:p-6 w-full max-w-md text-center shadow-[8px_8px_0px_#000] space-y-4">
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-center gap-1.5">
-                <span
-                  className={`font-mono-hud text-[10px] font-black px-2.5 py-0.5 border uppercase tracking-wider ${
-                    gameState.rules.allow7Swap
-                      ? 'bg-amber-950 text-amber-300 border-amber-700'
-                      : 'bg-neutral-900 text-neutral-300 border-neutral-700'
-                  }`}
-                >
-                  {gameState.rules.allow7Swap
-                    ? 'MATTEL HVW18 MANDATORY RULE'
-                    : 'CUSTOM RULE: OPTIONAL SWAP'}
-                </span>
-              </div>
-              <h3 className="font-display font-black text-2xl uppercase tracking-wider text-amber-400 flex items-center justify-center gap-2">
-                <Shuffle className="w-5 h-5" />{' '}
-                {gameState.rules.allow7Swap ? '7s Mandatory Hand Swap' : '7s Hand Swap (Optional)'}
-              </h3>
-              <p className="font-mono-hud text-xs text-neutral-300 leading-normal">
-                {gameState.rules.allow7Swap
-                  ? 'Playing a 7 forces you to exchange your entire hand with a chosen contender:'
-                  : 'Choose a contender to swap hands with, or play without swapping and keep your hand:'}
-              </p>
-            </div>
-
-            <div className="space-y-2 pt-1 max-h-60 overflow-y-auto font-mono-hud">
-              {opponents
-                .filter((p) => !p.isEliminated)
-                .map((target) => (
-                  <button
-                    key={target.id}
-                    type="button"
-                    onClick={() => handleChooseSwapTarget(target.id)}
-                    className="btn-stamp-secondary clip-chamfer-btn w-full p-3 bg-[#141219] hover:bg-amber-950/60 border border-neutral-800 hover:border-amber-500 flex items-center justify-between text-xs font-bold text-white transition-all cursor-pointer shadow-[2px_2px_0px_#000]"
-                  >
-                    <div className="flex items-center space-x-2.5">
-                      <span className="text-xl">{target.avatar}</span>
-                      <span className="font-display font-black text-sm uppercase">{target.name}</span>
-                    </div>
-                    <span className="text-amber-400 font-black px-2 py-0.5 bg-black/50 border border-amber-500/40">
-                      SWAP HAND ({target.cards.length} CARDS)
-                    </span>
-                  </button>
-                ))}
-            </div>
-
-            <div className="space-y-2 pt-2 border-t border-neutral-800">
-              {/* If 7-Swap rule is OFF in lobby, provide the option to play without swapping */}
-              {!gameState.rules.allow7Swap && (
-                <button
-                  type="button"
-                  onClick={handlePlay7WithoutSwap}
-                  className="btn-stamp-slam clip-chamfer-btn w-full py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-display font-black text-sm uppercase tracking-wider border-2 border-emerald-400 shadow-[3px_3px_0px_#000] cursor-pointer transition-all"
-                >
-                  🃏 Play Without Swapping (Keep Hand)
-                </button>
-              )}
-
-              <button
-                type="button"
-                onClick={() => setSelected7Card(null)}
-                className="btn-stamp-secondary clip-chamfer-btn w-full py-2 bg-neutral-900 hover:bg-neutral-800 text-neutral-400 hover:text-white font-mono-hud font-bold text-xs border border-neutral-700 transition-colors cursor-pointer uppercase"
-              >
-                Cancel (Pick a Different Card)
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Elimination Highlight / Killcam Banner */}
-      {gameState.lastElimination && gameState.lastElimination.victimId === currentUserId && (
-        <KillcamHighlight
-          highlight={gameState.lastElimination?.id === dismissedKillcamId ? undefined : gameState.lastElimination}
-          onDismiss={() => {
-            if (gameState.lastElimination?.id) {
-              setDismissedKillcamId(gameState.lastElimination.id);
-            }
-          }}
-        />
-      )}
-
-      {/* Non-intrusive Toast for other active players when someone is knocked out */}
-      {gameState.lastElimination && gameState.lastElimination.victimId !== currentUserId && gameState.lastElimination.id !== dismissedKillcamId && (
-        <div className="fixed top-3 inset-x-0 z-40 flex justify-center pointer-events-none px-4 animate-fadeIn font-mono-hud">
-          <div className="bg-red-950/95 border-2 border-red-600 text-white px-4 py-1.5 clip-chamfer shadow-[4px_4px_0px_#000] text-xs font-black flex items-center space-x-2">
-            <span>💀</span>
-            <span className="uppercase">{gameState.lastElimination.victimName} knocked out by Mercy limit!</span>
-            <span className="text-[10px] text-red-300 font-normal">({gameState.lastElimination.cardCount} cards)</span>
-          </div>
-        </div>
-      )}
-
-      {/* Game Over Modal */}
-      {gameState.status === 'ended' && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-lg animate-fadeIn font-mono-hud">
-          <div className="clip-chamfer-lg bg-[#0e0d12] border-2 border-amber-500 p-6 sm:p-8 w-full max-w-lg text-center shadow-[10px_10px_0px_#000] space-y-4 max-h-[90vh] overflow-y-auto">
-            <div className="w-16 h-16 clip-chamfer-btn bg-amber-500/20 border-2 border-amber-400 text-amber-400 flex items-center justify-center mx-auto text-3xl shadow-[3px_3px_0px_#000]">
-              <Trophy className="w-8 h-8" />
-            </div>
-
-            <div className="space-y-1">
-              <h2 className="font-display font-black text-3xl sm:text-4xl text-white uppercase tracking-wider">
-                {gameState.winnerId === currentUserId ? 'VICTORY SECURED!' : 'MATCH CONCLUDED'}
-              </h2>
-              <p className="text-xs text-neutral-400 font-sans">
-                {gameState.winnerReason === 'mercy_eliminations'
-                  ? 'Last survivor standing through brutal 25-Card Mercy eliminations!'
-                  : 'Successfully cleared all cards from hand!'}
-              </p>
-            </div>
-
-            <div className="p-4 clip-chamfer bg-[#141219] border border-neutral-800 flex items-center justify-between text-left shadow-[2px_2px_0px_#000]">
-              <div>
-                <span className="text-[10px] text-amber-400 uppercase font-black tracking-widest block">
-                  ARENA CHAMPION
-                </span>
-                <span className="font-display font-black text-xl text-white uppercase">
-                  {gameState.players.find((p) => p.id === gameState.winnerId)?.name}
-                </span>
-              </div>
-              <span className="text-3xl">
-                {gameState.players.find((p) => p.id === gameState.winnerId)?.avatar}
-              </span>
-            </div>
-
-            {/* Match Highlights & Awards Podium */}
-            <MatchAwardsPodium awards={gameState.awards} />
-
-            <div className="flex flex-col sm:flex-row items-center justify-center gap-2.5 pt-2">
-              {onReturnToLobby && (
-                <button
-                  type="button"
-                  onClick={onReturnToLobby}
-                  className="btn-stamp-secondary clip-chamfer-btn w-full sm:flex-1 py-3 px-3 bg-amber-400 hover:bg-amber-300 text-black font-display font-black text-sm uppercase tracking-wider cursor-pointer"
-                >
-                  Return to Lobby
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={onRestartGame}
-                className="btn-stamp-slam clip-chamfer-btn w-full sm:flex-1 py-3 px-3 bg-red-600 hover:bg-red-500 text-white font-display font-black text-sm uppercase tracking-wider cursor-pointer"
-              >
-                Instant Rematch
-              </button>
-              <button
-                type="button"
-                onClick={onLeaveGame}
-                className="btn-stamp-secondary clip-chamfer-btn w-full sm:w-auto py-3 px-4 bg-neutral-900 hover:bg-neutral-800 text-neutral-400 hover:text-white font-mono-hud font-bold text-xs border border-neutral-700 cursor-pointer uppercase"
-              >
-                Exit
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Leave Match Confirmation Modal */}
-      {showLeaveConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fadeIn font-mono-hud">
-          <div className="w-full max-w-sm clip-chamfer-lg bg-[#0e0d12] border-2 border-red-600 p-5 sm:p-6 shadow-[8px_8px_0px_#000] flex flex-col items-center text-center space-y-3">
-            <div className="w-12 h-12 clip-chamfer-btn bg-red-950 border border-red-600 flex items-center justify-center">
-              <LogOut className="w-6 h-6 text-red-400" />
-            </div>
-            <h3 className="font-display font-black text-2xl uppercase tracking-wide text-white">
-              Retreat from Arena?
-            </h3>
-            <p className="text-xs text-neutral-400 font-sans leading-relaxed">
-              Are you sure you want to retreat? A bot will take over your cards so other contenders can continue the battle smoothly.
-            </p>
-            <div className="flex items-center space-x-2.5 w-full pt-2">
-              <button
-                type="button"
-                onClick={() => setShowLeaveConfirm(false)}
-                className="btn-stamp-secondary clip-chamfer-btn flex-1 py-2.5 bg-neutral-900 hover:bg-neutral-800 text-neutral-200 text-xs font-bold border border-neutral-700 transition-colors cursor-pointer uppercase"
-              >
-                Stay & Fight
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowLeaveConfirm(false);
-                  onLeaveGame();
-                }}
-                className="btn-stamp-slam clip-chamfer-btn flex-1 py-2.5 bg-red-600 hover:bg-red-500 text-white text-xs font-display font-black uppercase tracking-wider cursor-pointer"
-              >
-                Retreat
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Global Card Deal Flight Overlay */}
-      <CardDealFlight flight={activeDrawFlight || opponentDrawFlight} isLandscape={isLandscapeMobile} />
+      {/* Global GSAP 3D Card Deal & Play Flight Overlay */}
+      <CardDealFlight
+        flight={activeDrawFlight}
+        opponentFlight={opponentDrawFlight}
+        initialDeal={initialDeal}
+        playedFlight={playedFlight}
+        isLandscape={isLandscapeMobile}
+        timeScale={playbackSpeed}
+        onCardLanded={handleCardLanded}
+        onOpponentCardLanded={handleOpponentCardLanded}
+        onInitialDealComplete={handleInitialDealComplete}
+        onRevealDiscardCard={handleRevealDiscardCard}
+        onPlayedCardLanded={handlePlayedCardLanded}
+        onFlightComplete={handleFlightComplete}
+        onOpponentFlightComplete={handleOpponentFlightComplete}
+      />
     </div>
   );
 };

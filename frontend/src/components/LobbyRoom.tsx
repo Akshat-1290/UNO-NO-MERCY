@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { GameState, LobbyRules, ChatMessage, BotPersonality } from '../../../shared/src/types';
+import { GameState, LobbyRules, ChatMessage, BotPersonality } from '@uno/shared/types';
 import { ChatPanel } from './ChatPanel';
 import {
   Copy,
@@ -87,9 +87,14 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
     gameState.players.length >= 2 &&
     gameState.players.every((p) => p.isReady || p.isHost || p.isBot);
 
-  // Maximum 8 player slots for visualization
-  const totalSlots = 8;
+  // Player slots defined by room configuration (2-8, or 4 for bot-only arena)
+  const totalSlots = gameState.maxPlayers || 8;
   const emptySlotsCount = Math.max(0, totalSlots - gameState.players.length);
+  const botCount = gameState.players.filter((p) => p.isBot).length;
+  const canDeployBots =
+    isHost &&
+    gameState.players.length < totalSlots &&
+    (!gameState.isBotOnly || botCount < 3);
 
   return (
     <div className="max-w-7xl mx-auto px-3 sm:px-6 py-6 space-y-6 animate-fadeIn">
@@ -214,28 +219,35 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
                 </span>
               </div>
 
-              {/* Add AI Bot Dropdown */}
-              {isHost && gameState.players.length < 8 && (
+              {/* Add AI Bot Dropdown / Mobile Modal */}
+              {canDeployBots && (
                 <div className="relative font-mono-hud text-xs">
                   <button
                     type="button"
                     onClick={() => setShowBotMenu(!showBotMenu)}
-                    className="btn-stamp-secondary clip-chamfer-btn flex items-center space-x-1.5 px-3.5 py-1.5 bg-purple-950/80 hover:bg-purple-900 border border-purple-700 text-purple-200 font-bold transition-colors cursor-pointer uppercase"
+                    className="btn-stamp-secondary clip-chamfer-btn inline-flex items-center justify-center gap-1.5 h-8 px-3 bg-purple-950/80 hover:bg-purple-900 border border-purple-700 text-purple-200 font-bold transition-colors cursor-pointer uppercase"
                   >
-                    <Bot className="w-3.5 h-3.5 text-purple-300" />
+                    <Bot className="w-3.5 h-3.5 text-purple-300 shrink-0" />
                     <span>+ Deploy Bot</span>
-                    <ChevronDown className="w-3 h-3 text-purple-400" />
+                    <ChevronDown className="w-3 h-3 text-purple-400 shrink-0" />
                   </button>
 
                   {showBotMenu && (
                     <>
                       <div
-                        className="fixed inset-0 z-40"
+                        className="fixed inset-0 z-40 bg-black/70 sm:bg-transparent backdrop-blur-[2px] sm:backdrop-blur-none"
                         onClick={() => setShowBotMenu(false)}
                       />
-                      <div className="absolute right-0 top-full mt-2 w-64 p-2 clip-chamfer-lg bg-[#0f0d15] border-2 border-purple-700 shadow-[6px_6px_0px_#000] z-50 space-y-1.5 backdrop-blur-md">
-                        <div className="text-[10px] font-mono-hud font-black uppercase tracking-wider text-purple-300 px-2 py-1 border-b border-purple-900/60">
-                          Select AI Combat Profile
+                      <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[calc(100vw-2rem)] max-w-[280px] sm:absolute sm:left-auto sm:right-0 sm:top-full sm:translate-x-0 sm:translate-y-0 sm:mt-2 sm:w-64 p-2.5 sm:p-2 clip-chamfer-lg bg-[#0f0d15] border-2 border-purple-700 shadow-[6px_6px_0px_#000] z-50 space-y-1.5 backdrop-blur-md">
+                        <div className="flex items-center justify-between text-[10px] font-mono-hud font-black uppercase tracking-wider text-purple-300 px-2 py-1 border-b border-purple-900/60">
+                          <span>Select AI Combat Profile</span>
+                          <button
+                            type="button"
+                            onClick={() => setShowBotMenu(false)}
+                            className="sm:hidden text-neutral-400 hover:text-white px-1 font-bold"
+                          >
+                            ✕
+                          </button>
                         </div>
                         <button
                           type="button"

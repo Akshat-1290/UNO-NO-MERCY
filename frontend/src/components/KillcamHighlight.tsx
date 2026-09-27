@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { EliminationHighlight } from '../../../shared/src/types';
+import { EliminationHighlight } from '@uno/shared/types';
 import { Skull, Flame, Swords, X, Video } from 'lucide-react';
 
 interface KillcamHighlightProps {
@@ -48,7 +48,7 @@ export const KillcamHighlight: React.FC<KillcamHighlightProps> = ({ highlight, o
       onClick={(e) => {
         if (e.target === e.currentTarget) handleDismiss();
       }}
-      className="fixed inset-0 z-50 pointer-events-auto flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-fadeIn"
+      className="fixed inset-0 z-[350] pointer-events-auto flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-fadeIn"
     >
       {/* Screen edge emergency vignette */}
       <div className="absolute inset-0 border-8 border-red-600/60 pointer-events-none" />

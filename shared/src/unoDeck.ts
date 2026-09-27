@@ -1,4 +1,4 @@
-import { Card, CardColor, CardValue, LobbyRules } from './types';
+import { Card, CardColor, CardValue, LobbyRules } from '@uno/shared/types';
 
 export function getPenaltyAmount(value: CardValue): number {
   switch (value) {
@@ -231,3 +231,74 @@ export function getCardImagePath(card: Card, showBack: boolean = false): string 
 
   return `/cards/${card.color}_${card.value}.webp`;
 }
+
+const preloadedCardImages = new Map<string, HTMLImageElement>();
+let cardPreloadInitiated = false;
+
+/**
+ * Pre-fetches and keeps decoded HTMLImageElement instances in memory for all 85 card textures
+ * so played/drawn cards and discard pile transitions render in 0ms without texture decode flicker.
+ */
+export function preloadAllCardImages(): void {
+  if (typeof window === 'undefined' || cardPreloadInitiated) return;
+  cardPreloadInitiated = true;
+
+  const colors = ['red', 'yellow', 'green', 'blue'] as const;
+  const colorValues = [
+    '0',
+    '1',
+    '2',
+    '3',
+    '4',
+    '5',
+    '6',
+    '7',
+    '8',
+    '9',
+    'draw2',
+    'draw4',
+    'reverse',
+    'skip',
+    'skip_everyone',
+    'discard_all',
+  ];
+  const wildValues = [
+    'wild_color_roulette',
+    'wild_draw10',
+    'wild_draw6',
+    'wild_reverse_draw4',
+  ];
+
+  const paths: string[] = ['/cards/card_back.webp', '/cards/wild_wild.webp'];
+  for (const c of colors) {
+    for (const v of colorValues) {
+      paths.push(`/cards/${c}_${v}.webp`);
+    }
+  }
+  for (const w of wildValues) {
+    paths.push(`/cards/${w}.webp`);
+    for (const c of colors) {
+      paths.push(`/cards/${w}_${c}.webp`);
+    }
+  }
+
+  let index = 0;
+  const loadBatch = () => {
+    const batchEnd = Math.min(index + 12, paths.length);
+    for (; index < batchEnd; index++) {
+      const src = paths[index];
+      if (!preloadedCardImages.has(src)) {
+        const img = new Image();
+        img.decoding = 'sync';
+        img.src = src;
+        preloadedCardImages.set(src, img);
+      }
+    }
+    if (index < paths.length) {
+      setTimeout(loadBatch, 25);
+    }
+  };
+
+  loadBatch();
+}
+

@@ -1,66 +1,60 @@
 import { Express, Request, Response } from 'express';
-import { games, userProfiles, matchHistories } from './state';
+import { games, userProfiles, matchHistories, getPublicLobbies, getActiveMatchForUser } from './state';
 
 export function registerRoutes(app: Express) {
-  app.get('/api/lobbies', (req: Request, res: Response) => {
-    const lobbyList = Array.from(games.values())
-      .filter((g) => !g.isPrivate && g.status === 'waiting')
-      .map((g) => ({
-        roomId: g.roomId,
-        roomName: g.roomName,
-        playerCount: g.players.length,
-        maxPlayers: 8,
-        rules: g.rules,
-      }));
-    res.json(lobbyList);
+  // Dynamic SEO robots.txt with live origin resolution
+  app.get('/robots.txt', (req: Request, res: Response) => {
+    const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';
+    const host = req.get('host') || 'ais-pre-k6ufdtatiy6ci76iymaxnj-275769883484.asia-east1.run.app';
+    const baseUrl = (process.env.APP_URL || `${proto}://${host}`).replace(/\/$/, '');
+    res.type('text/plain');
+    res.send(`User-agent: *\nAllow: /\nDisallow: /api/\n\nSitemap: ${baseUrl}/sitemap.xml\n`);
+  });
+
+  // Dynamic XML Sitemap for search engine indexing
+  app.get('/sitemap.xml', (req: Request, res: Response) => {
+    const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';
+    const host = req.get('host') || 'ais-pre-k6ufdtatiy6ci76iymaxnj-275769883484.asia-east1.run.app';
+    const baseUrl = (process.env.APP_URL || `${proto}://${host}`).replace(/\/$/, '');
+    const today = new Date().toISOString().split('T')[0];
+    res.type('application/xml');
+    res.send(`<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>${baseUrl}/</loc>
+    <lastmod>${today}</lastmod>
+    <changefreq>daily</changefreq>
+    <priority>1.0</priority>
+  </url>
+</urlset>`);
+  });
+
+  app.get('/api/lobbies', (_req: Request, res: Response) => {
+    res.json(getPublicLobbies());
   });
 
   app.get('/api/active-match/:id', (req: Request, res: Response) => {
-    const userId = req.params.id;
-    const match = Array.from(games.values()).find(
-      (g) =>
-        (g.status === 'playing' || g.status === 'paused') &&
-        g.players.some((p) => p.id === userId && !p.isEliminated) &&
-        g.players.some((p) => !p.isBot && p.id !== userId)
-    );
-
-    if (match) {
-      res.json({
-        active: true,
-        roomId: match.roomId,
-        roomName: match.roomName,
-        status: match.status,
-        playerCount: match.players.length,
-        pauseReason: match.pauseReason,
-      });
-    } else {
-      res.json({ active: false });
-    }
+    res.json(getActiveMatchForUser(req.params.id));
   });
 
   app.get('/api/profile/:id', (req: Request, res: Response) => {
-    const profile = userProfiles.get(req.params.id) || {
-      id: req.params.id,
-      name: 'Player',
-      avatar: '🔥',
-      title: 'Mercy Contender',
-      gamesPlayed: 0,
-      wins: 0,
-      mercyEliminationsDealt: 0,
-      mercyEliminationsSuffered: 0,
-      unoCalls: 0,
-      highestCardCount: 0,
-      highestStackSurvived: 0,
-    };
-    res.json(profile);
+    const profile = userProfiles.get(req.params.id);
+    if (profile) {
+      res.json(profile);
+    } else {
+      res.json({
+        id: req.params.id,
+        notFound: true,
+      });
+    }
   });
 
   app.post('/api/profile/:id', (req: Request, res: Response) => {
     const existing = userProfiles.get(req.params.id) || {
       id: req.params.id,
-      name: 'Player',
-      avatar: '🔥',
-      title: 'Mercy Contender',
+      name: req.body.name || 'MercyWarrior',
+      avatar: req.body.avatar || '🔥',
+      title: req.body.title || 'Mercy Contender',
       gamesPlayed: 0,
       wins: 0,
       mercyEliminationsDealt: 0,
@@ -69,7 +63,11 @@ export function registerRoutes(app: Express) {
       highestCardCount: 0,
       highestStackSurvived: 0,
     };
-    const updated = { ...existing, ...req.body };
+    const updated = {
+      ...existing,
+      ...req.body,
+      id: req.params.id,
+    };
     userProfiles.set(req.params.id, updated);
     res.json(updated);
   });

@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@uno/shared": "workspace:*",
+    "gsap": "^3.15.0",
     "canvas-confetti": "^1.9.4",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",

@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { TableTaunt } from '../../../shared/src/types';
+import { createPortal } from 'react-dom';
+import { TableTaunt } from '@uno/shared/types';
 
 interface TableTauntFloatingProps {
   taunt?: TableTaunt;
@@ -15,6 +16,7 @@ export const TableTauntFloating: React.FC<TableTauntFloatingProps> = ({
   const rawList = taunts && taunts.length > 0 ? taunts : taunt ? [taunt] : [];
   const [, setTick] = useState(0);
   const localReceiptMap = useRef<Map<string, number>>(new Map());
+  const anchorRef = useRef<HTMLSpanElement>(null);
 
   // Record client-local receipt timestamp for any new taunt to eliminate clock skew bugs
   useEffect(() => {
@@ -49,20 +51,26 @@ export const TableTauntFloating: React.FC<TableTauntFloatingProps> = ({
   }, [rawList.length > 0]);
 
   const now = Date.now();
+  const isBottom = placement === 'bottom';
 
   // Filter active taunts within a crisp 3.6-second duration
-  const activeList = rawList
+  const filteredList = rawList
     .filter((t) => {
       const start = localReceiptMap.current.get(t.id) || t.timestamp;
       return now - start < 3600;
     })
-    .slice(0, 3) // maximum 3 stacked taunts to keep layout pristine
-    .reverse(); // oldest on top/first, newest closest to avatar pointer
+    .slice(0, 3); // maximum 3 stacked taunts to keep layout pristine
 
-  if (activeList.length === 0) return null;
+  // For 'bottom' placement (below opponent name), keep newest first (idx 0) closest to the top pointer.
+  // For 'top' placement (above local player avatar), reverse so newest is last (closest to bottom pointer).
+  const activeList = isBottom ? filteredList : [...filteredList].reverse();
+
+  if (activeList.length === 0) {
+    return <span ref={anchorRef} className="hidden" aria-hidden="true" />;
+  }
 
   if (placement === 'overlay') {
-    const latestItem = activeList[0];
+    const latestItem = filteredList[0];
     if (!latestItem) return null;
     const start = localReceiptMap.current.get(latestItem.id) || latestItem.timestamp;
     const elapsed = now - start;
@@ -81,13 +89,26 @@ export const TableTauntFloating: React.FC<TableTauntFloatingProps> = ({
     );
   }
 
-  const isBottom = placement === 'bottom';
+  const parentEl = anchorRef.current?.parentElement;
+  const rect = parentEl?.getBoundingClientRect();
 
-  return (
+  const bubbleStack = (
     <div
-      className={`absolute ${
-        isBottom ? 'top-full mt-2' : 'bottom-full mb-2'
-      } left-1/2 -translate-x-1/2 z-[999] pointer-events-none flex flex-col items-center gap-1 transition-all max-w-[min(200px,80vw)] w-max`}
+      style={
+        rect
+          ? {
+              position: 'fixed',
+              left: `${Math.max(84, Math.min(window.innerWidth - 84, rect.left + rect.width / 2))}px`,
+              top: isBottom ? `${rect.bottom + 8}px` : `${rect.top - 8}px`,
+              transform: isBottom ? 'translate(-50%, 0)' : 'translate(-50%, -100%)',
+            }
+          : undefined
+      }
+      className={`${
+        rect
+          ? 'z-40'
+          : `absolute ${isBottom ? 'top-full mt-2' : 'bottom-full mb-2'} left-1/2 -translate-x-1/2 z-40`
+      } pointer-events-none flex flex-col items-center gap-1 transition-all max-w-[min(200px,80vw)] w-max font-mono-hud`}
     >
       {activeList.map((item, idx) => {
         const start = localReceiptMap.current.get(item.id) || item.timestamp;
@@ -104,7 +125,7 @@ export const TableTauntFloating: React.FC<TableTauntFloatingProps> = ({
                 : 'border-neutral-700/80 shadow-md shadow-black/90 text-neutral-300 scale-95 opacity-85'
             } font-black text-[11px] sm:text-xs flex items-center gap-1.5 transition-all duration-200 transform ${
               isFading
-                ? 'opacity-0 -translate-y-2 scale-90 duration-500'
+                ? `opacity-0 ${isBottom ? 'translate-y-1.5' : '-translate-y-1.5'} scale-90 duration-500`
                 : 'opacity-100 translate-y-0 duration-200'
             }`}
           >
@@ -122,5 +143,12 @@ export const TableTauntFloating: React.FC<TableTauntFloatingProps> = ({
         );
       })}
     </div>
+  );
+
+  return (
+    <>
+      <span ref={anchorRef} className="hidden" aria-hidden="true" />
+      {rect && typeof document !== 'undefined' ? createPortal(bubbleStack, document.body) : bubbleStack}
+    </>
   );
 };

@@ -116,7 +116,7 @@ button, [role="button"] {
 /* Dark Ash / Asphalt Texture with Thin Glowing Red/Orange Crack Lines (No soft gradient blobs) */
 .bg-ash-asphalt {
   background-color: #09080a;
-  background-image: 
+  background-image:
     /* Subtle asphalt grit lighting */
     radial-gradient(circle at 50% 100%, rgba(255, 38, 0, 0.06) 0%, transparent 75%),
     /* Crisp repeating SVG crack fissures */

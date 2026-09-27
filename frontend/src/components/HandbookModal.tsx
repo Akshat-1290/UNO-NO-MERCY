@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { GameState, Card } from '../../../shared/src/types';
+import { GameState, Card } from '@uno/shared/types';
 import {
   X,
   ShieldCheck,
@@ -209,7 +209,7 @@ export const HandbookModal: React.FC<HandbookModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 animate-fadeIn">
+    <div className="fixed inset-0 z-[500] flex items-center justify-center p-4 bg-black/85 animate-fadeIn">
       <div className="clip-chamfer-lg bg-[#0e0d12] border-2 border-neutral-700 w-full max-w-2xl h-[88vh] flex flex-col shadow-[8px_8px_0px_#000] overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b-2 border-neutral-800 bg-[#121017]">

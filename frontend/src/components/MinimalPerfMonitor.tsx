@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { perfEngine, PerfMetrics } from '../utils/perfTracker';
+import { perfEngine, PerfMetrics, IS_PERF_TRACKER_ENABLED } from '../utils/perfTracker';
 import { Activity, ChevronUp, ChevronDown, X, RotateCcw } from 'lucide-react';
 
 export const MinimalPerfMonitor: React.FC = () => {
@@ -35,7 +35,7 @@ export const MinimalPerfMonitor: React.FC = () => {
     }
     if (compactPingRef.current) {
       compactPingRef.current.textContent = m.ping > 0 ? `${m.ping}ms` : '--';
-      compactPingRef.current.className = m.ping > 0 && m.ping < 120 ? 'text-emerald-400 font-medium' : 'text-amber-400 font-medium';
+      compactPingRef.current.className = m.ping > 0 && m.ping <= 160 ? 'text-emerald-400 font-medium' : m.ping <= 260 ? 'text-amber-400 font-medium' : 'text-rose-400 font-medium';
     }
     if (compactDropRef.current) {
       compactDropRef.current.textContent = `${m.frameDrops}`;
@@ -51,7 +51,7 @@ export const MinimalPerfMonitor: React.FC = () => {
     if (expMinFpsRef.current) expMinFpsRef.current.textContent = `${m.minFps}`;
     if (expPingRef.current) {
       expPingRef.current.textContent = m.ping > 0 ? `${m.ping}ms` : '--';
-      expPingRef.current.className = m.ping > 0 && m.ping < 120 ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold';
+      expPingRef.current.className = m.ping > 0 && m.ping <= 160 ? 'text-emerald-400 font-bold' : m.ping <= 260 ? 'text-amber-400 font-bold' : 'text-rose-400 font-bold';
     }
     if (expJitterRef.current) expJitterRef.current.textContent = `${m.jitter}ms`;
     if (expDropRef.current) {
@@ -65,6 +65,7 @@ export const MinimalPerfMonitor: React.FC = () => {
 
   // Listen to keyboard shortcut (Shift + P) to toggle monitor
   useEffect(() => {
+    if (!IS_PERF_TRACKER_ENABLED) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.shiftKey && (e.key === 'P' || e.key === 'p')) {
         setIsVisible((prev) => !prev);
@@ -76,22 +77,29 @@ export const MinimalPerfMonitor: React.FC = () => {
 
   // Subscribe to telemetry engine updates (runs out-of-band on 1.2s tick)
   useEffect(() => {
+    if (!IS_PERF_TRACKER_ENABLED) return;
+    perfEngine.setHudState(isVisible, isExpanded);
     if (!isVisible) return;
     const unsubscribe = perfEngine.subscribe(updateDom);
     updateDom(perfEngine.getMetrics());
     return unsubscribe;
-  }, [isVisible, updateDom]);
+  }, [isVisible, isExpanded, updateDom]);
 
   // When expanding or collapsing, re-populate immediate values
   useEffect(() => {
-    if (isVisible) {
+    if (IS_PERF_TRACKER_ENABLED && isVisible) {
       updateDom(perfEngine.getMetrics());
     }
   }, [isExpanded, isVisible, updateDom]);
 
+  if (!IS_PERF_TRACKER_ENABLED) {
+    return null;
+  }
+
   const handleReset = (e: React.MouseEvent) => {
     e.stopPropagation();
     perfEngine.resetStats();
+    perfEngine.sendPing();
   };
 
   // If hidden, show tiny toggle pill

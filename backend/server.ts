@@ -1,35 +1,49 @@
 import express from 'express';
-import cors from 'cors';
 import http from 'http';
+import cors from 'cors';
 import dotenv from 'dotenv';
 import { registerRoutes } from './server/routes';
 import { setupWebSocketServer } from './server/wsServer';
 
 dotenv.config();
 
-const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
-app.use(cors({
-  origin: process.env.FRONTEND_URL,
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  credentials: true,
-}));
+
+const app = express();
+
+app.set('trust proxy', 1);
+
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL,
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    credentials: true,
+  })
+);
+
 app.use(express.json());
 
-// Register API and referee endpoints
+app.get('/health', (_req, res) => {
+  res.status(200).json({ status: 'ok', uptime: process.uptime() });
+});
+
 registerRoutes(app);
 
-async function startServer() {
-  const server = http.createServer(app);
+const server = http.createServer(app);
+setupWebSocketServer(server);
 
-  // Initialize WebSocket subsystem
-  setupWebSocketServer(server);
+server.on('error', (err) => {
+  console.error('Server network error:', err);
+});
 
-  server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Backend server running on http://0.0.0.0:${PORT}`);
-  });
-}
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`UNO No Mercy Backend listening on http://0.0.0.0:${PORT}`);
+});
 
-startServer().catch((err) => {
-  console.error('Failed to start server:', err);
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });

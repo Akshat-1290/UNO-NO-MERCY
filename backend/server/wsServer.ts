@@ -22,6 +22,10 @@ import {
   sendFullSync,
   triggerTableTaunt,
   countConnectedHumanPlayers,
+  getPublicLobbies,
+  broadcastLobbyListUpdate,
+  getActiveMatchForUser,
+  sendActiveMatchStatus,
 } from './state';
 import {
   startGame,
@@ -32,35 +36,28 @@ import {
   checkMercyRule,
   advanceTurn,
 } from './gameEngine';
-import { checkAndTriggerBotTurn } from './botEngine';
+import { checkAndTriggerBotTurn, clearBotTimer } from './botEngine';
 
 export function setupWebSocketServer(server: http.Server) {
   const wss = new WebSocketServer({ server });
 
   wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
-    const origin = req.headers.origin;
-
-    if (process.env.NODE_ENV === 'production') {
-      const allowedOrigin = process.env.FRONTEND_URL;
-
-      if (origin !== allowedOrigin) {
-        console.log(`Rejected WebSocket connection from origin: ${origin}`);
-
-        ws.close(1008, 'Origin not allowed');
-        return;
-      }
+     const origin = req.headers.origin;
+    if (process.env.NODE_ENV === 'production' && origin !== process.env.FRONTEND_URL) {
+      console.log(`Rejected WebSocket connection from origin: ${origin}`);
+      ws.close(1008, 'Origin not allowed');
+      return;
+    }
+    // Disable Nagle's algorithm for sub-millisecond real-time packet delivery
+    const socket = (ws as any)._socket;
+    if (socket && typeof socket.setNoDelay === 'function') {
+      socket.setNoDelay(true);
     }
 
     let currentRoomId = '';
     let currentPlayerId = '';
 
-    socketClients.set(ws, {
-      ws,
-      playerId: '',
-      roomId: '',
-      isAlive: true,
-    });
-
+    socketClients.set(ws, { ws, playerId: '', roomId: '', isAlive: true });
 
     ws.on('pong', () => {
       const client = socketClients.get(ws);
@@ -82,6 +79,7 @@ export function setupWebSocketServer(server: http.Server) {
       disassociateSocketFromRoom(ws, roomId);
 
       if (game.status === 'waiting') {
+        clearBotTimer(roomId);
         if (game.hostId === playerId) {
           setTimeout(() => {
             const currentG = games.get(roomId);
@@ -96,6 +94,7 @@ export function setupWebSocketServer(server: http.Server) {
 
             if (hostConnected) return;
 
+            clearBotTimer(roomId);
             broadcastToRoom(roomId, {
               type: 'LOBBY_CANCELLED',
               message: 'The host has cancelled and closed the lobby.',
@@ -110,28 +109,53 @@ export function setupWebSocketServer(server: http.Server) {
               roomSockets.delete(roomId);
             }
             games.delete(roomId);
+            broadcastLobbyListUpdate();
           }, 3500);
           return;
         }
 
         game.players = game.players.filter((p) => p.id !== playerId);
         if (game.players.length === 0) {
+          clearBotTimer(roomId);
           games.delete(roomId);
+          broadcastLobbyListUpdate();
           return;
         }
         broadcastLog(game, `🚪 ${leavingPlayer.originalName || leavingPlayer.name} left the lobby.`, 'play');
         sendFullSync(game);
+        broadcastLobbyListUpdate();
         return;
-      } else if (game.status === 'playing') {
+      } else if (game.status === 'playing' || game.status === 'ended') {
         const otherHumans = game.players.filter((p) => !p.isBot && !p.isAfk && p.id !== playerId);
         if (otherHumans.length === 0) {
+          clearBotTimer(roomId);
           games.delete(roomId);
           const rSockets = roomSockets.get(roomId);
           if (rSockets) {
             rSockets.forEach((s) => disassociateSocketFromRoom(s, roomId));
             roomSockets.delete(roomId);
           }
+          sendActiveMatchStatus(playerId);
           return;
+        }
+
+        // Auto-Host Migration on Mid-Game Disconnect:
+        // Automatically transfer host privileges to the oldest active connected human player
+        if (game.hostId === playerId || leavingPlayer.isHost) {
+          leavingPlayer.isHost = false;
+          const nextHost = game.players.find((p) => !p.isBot && !p.isAfk && !p.isEliminated && p.id !== playerId)
+            || game.players.find((p) => !p.isBot && !p.isAfk && p.id !== playerId)
+            || otherHumans[0];
+
+          if (nextHost) {
+            nextHost.isHost = true;
+            game.hostId = nextHost.id;
+            broadcastLog(
+              game,
+              `👑 Host disconnected: Host privileges automatically transferred to ${nextHost.originalName || nextHost.name}!`,
+              'system'
+            );
+          }
         }
 
         leavingPlayer.isAfk = true;
@@ -148,6 +172,7 @@ export function setupWebSocketServer(server: http.Server) {
         if (game.players[game.currentTurnIndex]?.id === playerId) {
           checkAndTriggerBotTurn(game);
         }
+        sendActiveMatchStatus(playerId);
       }
       sendFullSync(game);
     };
@@ -183,6 +208,45 @@ export function setupWebSocketServer(server: http.Server) {
         }
 
         switch (data.type) {
+          case 'SYNC_PROFILE': {
+            if (data.profile && data.profile.id) {
+              const prof = data.profile;
+              currentPlayerId = prof.id;
+              const existing = userProfiles.get(prof.id) || prof;
+              const merged = { ...existing, ...prof };
+              userProfiles.set(prof.id, merged);
+
+              const targetRoom = currentRoomId || data.roomId;
+              if (targetRoom) {
+                const g = games.get(targetRoom);
+                if (g) {
+                  const p = g.players.find((pl) => pl.id === prof.id);
+                  if (p) {
+                    if (prof.name) p.name = prof.name;
+                    if (prof.avatar) p.avatar = prof.avatar;
+                    sendFullSync(g);
+                  }
+                }
+              } else {
+                // Push initial public lobbies & active match status to home screen clients
+                ws.send(
+                  JSON.stringify({
+                    type: 'LOBBIES_UPDATED',
+                    lobbies: getPublicLobbies(),
+                  })
+                );
+                const matchStatus = getActiveMatchForUser(prof.id);
+                ws.send(
+                  JSON.stringify({
+                    type: 'ACTIVE_MATCH_STATUS',
+                    activeMatch: matchStatus.active ? matchStatus : null,
+                  })
+                );
+              }
+            }
+            break;
+          }
+
           case 'PING': {
             ws.send(
               JSON.stringify({
@@ -236,7 +300,7 @@ export function setupWebSocketServer(server: http.Server) {
           }
 
           case 'CREATE_LOBBY': {
-            let { roomId, roomName, playerName, avatar, rules, isPrivate, userId } = data;
+            let { roomId, roomName, playerName, avatar, rules, isPrivate, userId, maxPlayers, isBotOnly } = data;
             currentPlayerId = userId || `user_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
 
             if (!roomId || games.has(roomId)) {
@@ -246,6 +310,13 @@ export function setupWebSocketServer(server: http.Server) {
               }
             }
             currentRoomId = roomId;
+
+            const isBotRoom = !!isBotOnly || roomId.startsWith('BOTS-');
+            const targetMaxPlayers = isBotRoom
+              ? 4
+              : typeof maxPlayers === 'number' && maxPlayers >= 2 && maxPlayers <= 8
+              ? maxPlayers
+              : 8;
 
             const hostPlayer: Player = {
               id: currentPlayerId,
@@ -263,6 +334,8 @@ export function setupWebSocketServer(server: http.Server) {
               roomId,
               roomName: roomName || `${playerName}'s Mercy Arena`,
               isPrivate: !!isPrivate,
+              maxPlayers: targetMaxPlayers,
+              isBotOnly: isBotRoom,
               status: 'waiting',
               rules: { ...defaultRules, ...rules },
               players: [hostPlayer],
@@ -288,6 +361,9 @@ export function setupWebSocketServer(server: http.Server) {
                 gameState: getSanitizedGameState(newGame, currentPlayerId),
               })
             );
+            if (!newGame.isPrivate && !newGame.isBotOnly) {
+              broadcastLobbyListUpdate();
+            }
             break;
           }
 
@@ -347,8 +423,24 @@ export function setupWebSocketServer(server: http.Server) {
               return;
             }
 
-            if (game.players.length >= 8) {
-              ws.send(JSON.stringify({ type: 'ERROR', message: 'Lobby is full (maximum 8 players).' }));
+            if (game.isBotOnly && currentPlayerId !== game.hostId) {
+              ws.send(
+                JSON.stringify({
+                  type: 'ERROR',
+                  message: 'This is a private single-player bot arena and cannot be joined.',
+                })
+              );
+              return;
+            }
+
+            const limit = game.maxPlayers || 8;
+            if (game.players.length >= limit) {
+              ws.send(
+                JSON.stringify({
+                  type: 'ERROR',
+                  message: `Lobby is full. This room is limited to ${limit} players.`,
+                })
+              );
               return;
             }
 
@@ -377,6 +469,9 @@ export function setupWebSocketServer(server: http.Server) {
               })
             );
             sendFullSync(game);
+            if (!game.isPrivate && !game.isBotOnly) {
+              broadcastLobbyListUpdate();
+            }
             break;
           }
 
@@ -385,12 +480,40 @@ export function setupWebSocketServer(server: http.Server) {
             if (!game || game.hostId !== currentPlayerId) return;
             game.rules = { ...game.rules, ...data.rules };
             sendFullSync(game);
+            if (!game.isPrivate && !game.isBotOnly) {
+              broadcastLobbyListUpdate();
+            }
             break;
           }
 
           case 'ADD_BOT': {
             const game = games.get(currentRoomId);
-            if (!game || game.hostId !== currentPlayerId || game.players.length >= 8) return;
+            if (!game || game.hostId !== currentPlayerId) return;
+
+            const limit = game.maxPlayers || 8;
+            if (game.players.length >= limit) {
+              ws.send(
+                JSON.stringify({
+                  type: 'ERROR',
+                  message: `Cannot add bot: lobby is full (maximum ${limit} players).`,
+                })
+              );
+              return;
+            }
+
+            if (game.isBotOnly) {
+              const botCount = game.players.filter((p) => p.isBot).length;
+              if (botCount >= 3) {
+                ws.send(
+                  JSON.stringify({
+                    type: 'ERROR',
+                    message: 'Solo bot arena allows 1 player and a maximum of 3 bots.',
+                  })
+                );
+                return;
+              }
+            }
+
             const botIdx = game.players.filter((p) => p.isBot).length;
             const personality: BotPersonality =
               data.personality || (['aggressive', 'chaos', 'casual'][botIdx % 3] as BotPersonality);
@@ -419,6 +542,9 @@ export function setupWebSocketServer(server: http.Server) {
             game.players.push(botPlayer);
             broadcastLog(game, `🤖 Added AI Bot ${botPlayer.name} [${personality.toUpperCase()} AI]`, 'play');
             sendFullSync(game);
+            if (!game.isPrivate && !game.isBotOnly) {
+              broadcastLobbyListUpdate();
+            }
             break;
           }
 
@@ -429,8 +555,51 @@ export function setupWebSocketServer(server: http.Server) {
             const target = game.players.find((p) => p.id === targetId);
             if (target && !target.isHost) {
               game.players = game.players.filter((p) => p.id !== targetId);
+
+              // Evict target's socket connection from room so they don't stay in the lobby
+              const targetClient = clientSockets.get(targetId);
+              if (targetClient) {
+                targetClient.roomId = '';
+                if (targetClient.ws && targetClient.ws.readyState === WebSocket.OPEN) {
+                  try {
+                    targetClient.ws.send(
+                      JSON.stringify({
+                        type: 'KICKED_FROM_ROOM',
+                        message: 'You have been removed from the lobby by the host.',
+                      })
+                    );
+                    disassociateSocketFromRoom(targetClient.ws, currentRoomId);
+                  } catch (e) {
+                    console.error('Error notifying kicked player:', e);
+                  }
+                }
+              }
+
+              // Also scan any active socket associated with this playerId and roomId
+              socketClients.forEach((info) => {
+                if (info.playerId === targetId && info.roomId === currentRoomId) {
+                  info.roomId = '';
+                  if (info.ws && info.ws.readyState === WebSocket.OPEN) {
+                    try {
+                      info.ws.send(
+                        JSON.stringify({
+                          type: 'KICKED_FROM_ROOM',
+                          message: 'You have been removed from the lobby by the host.',
+                        })
+                      );
+                      disassociateSocketFromRoom(info.ws, currentRoomId);
+                    } catch (e) {
+                      console.error('Error notifying kicked socket:', e);
+                    }
+                  }
+                }
+              });
+
               broadcastLog(game, `🚪 ${target.name} was removed from the lobby.`, 'play');
               sendFullSync(game);
+              if (!game.isPrivate && !game.isBotOnly) {
+                broadcastLobbyListUpdate();
+              }
             }
             break;
           }
@@ -638,6 +807,13 @@ export function setupWebSocketServer(server: http.Server) {
             }
             currentRoomId = '';
             ws.send(JSON.stringify({ type: 'LEFT_ROOM_CONFIRMED' }));
+            ws.send(
+              JSON.stringify({
+                type: 'LOBBIES_UPDATED',
+                lobbies: getPublicLobbies(),
+              })
+            );
+            sendActiveMatchStatus(currentPlayerId);
             break;
           }
 
@@ -713,6 +889,7 @@ export function setupWebSocketServer(server: http.Server) {
 
             const requestingId = data.userId || currentPlayerId;
             if (game.hostId === requestingId) {
+              clearBotTimer(targetRoomId);
               broadcastToRoom(targetRoomId, {
                 type: 'LOBBY_CANCELLED',
                 message: 'The host has cancelled and closed the lobby.',
@@ -730,6 +907,7 @@ export function setupWebSocketServer(server: http.Server) {
               }
               games.delete(targetRoomId);
               currentRoomId = '';
+              broadcastLobbyListUpdate();
             }
             break;
           }
@@ -738,7 +916,13 @@ export function setupWebSocketServer(server: http.Server) {
             const targetRoomId = data.roomId || currentRoomId;
             const game = games.get(targetRoomId);
             if (!game) return;
+            const requestingId = data.userId || currentPlayerId;
+            if (game.hostId !== requestingId) {
+              ws.send(JSON.stringify({ type: 'ERROR', message: 'Only the arena host can return everyone to the lobby.' }));
+              return;
+            }
 
+            clearBotTimer(targetRoomId);
             game.status = 'waiting';
             game.endedAt = undefined;
             game.winnerId = undefined;
@@ -771,6 +955,9 @@ export function setupWebSocketServer(server: http.Server) {
               'play'
             );
             sendFullSync(game);
+            if (!game.isPrivate && !game.isBotOnly) {
+              broadcastLobbyListUpdate();
+            }
             break;
           }
 
@@ -802,10 +989,11 @@ export function setupWebSocketServer(server: http.Server) {
                 (p) => !p.isBot && p.id !== targetUserId && !p.isEliminated
               );
 
-              if (remainingHumans.length === 0 || game.hostId === targetUserId) {
+              if (remainingHumans.length === 0) {
+                clearBotTimer(targetRoomId);
                 broadcastToRoom(targetRoomId, {
                   type: 'LOBBY_CANCELLED',
-                  message: 'The match was abandoned and closed.',
+                  message: 'The match was abandoned and closed as all players left.',
                 });
                 game.players.forEach((p) => {
                   const c = clientSockets.get(p.id);
@@ -820,10 +1008,30 @@ export function setupWebSocketServer(server: http.Server) {
                 }
                 games.delete(targetRoomId);
               } else {
+                // If the host abandoned the match, migrate host to the next remaining active human
+                if (game.hostId === targetUserId) {
+                  const nextHost = remainingHumans[0];
+                  if (nextHost) {
+                    nextHost.isHost = true;
+                    game.hostId = nextHost.id;
+                    broadcastLog(
+                      game,
+                      `👑 Host privileges transferred to ${nextHost.originalName || nextHost.name}!`,
+                      'system'
+                    );
+                  }
+                }
                 checkMercyRule(game);
                 sendFullSync(game);
               }
             }
+            sendActiveMatchStatus(targetUserId);
+            ws.send(
+              JSON.stringify({
+                type: 'LOBBIES_UPDATED',
+                lobbies: getPublicLobbies(),
+              })
+            );
             break;
           }
 
@@ -831,6 +1039,12 @@ export function setupWebSocketServer(server: http.Server) {
             const targetRoomId = data.roomId || currentRoomId;
             const game = games.get(targetRoomId);
             if (!game) return;
+            const requestingId = data.userId || currentPlayerId;
+            if (game.hostId !== requestingId) {
+              ws.send(JSON.stringify({ type: 'ERROR', message: 'Only the arena host can launch an instant rematch.' }));
+              return;
+            }
+            clearBotTimer(targetRoomId);
             game.players.forEach((p) => {
               if (p.originalName) {
                 p.name = p.originalName;
@@ -882,6 +1096,7 @@ export function setupWebSocketServer(server: http.Server) {
 
   // Inactive room cleanup: clear abandoned/finished rooms with 0 players older than 30 minutes
   setInterval(() => {
+    let anyDeleted = false;
     games.forEach((game, rId) => {
       const activeConnections = Array.from(socketClients.values()).filter(
         (c) => c.roomId === rId && c.ws.readyState === WebSocket.OPEN
@@ -891,13 +1106,18 @@ export function setupWebSocketServer(server: http.Server) {
           games.delete(rId);
           roomDrawPiles.delete(rId);
           roomMatchStats.delete(rId);
+          anyDeleted = true;
         } else if (game.status === 'waiting') {
           games.delete(rId);
           roomDrawPiles.delete(rId);
           roomMatchStats.delete(rId);
+          anyDeleted = true;
         }
       }
     });
+    if (anyDeleted) {
+      broadcastLobbyListUpdate();
+    }
   }, 60000);
 
   // Turn timer ticker (runs every second)
@@ -921,7 +1141,18 @@ export function setupWebSocketServer(server: http.Server) {
         }
 
         if (game.rules.turnTimerSeconds > 0) {
-          game.turnTimeRemaining -= 1;
+          const player = game.players[game.currentTurnIndex];
+          const isHumanTurn = player && !player.isBot && !player.isEliminated;
+
+          if (game.turnTimeRemaining > 0) {
+            game.turnTimeRemaining -= 1;
+            (game as any).turnGraceStartedAt = undefined;
+          } else {
+            // Timer has hit 0s: start 1.5s network grace period for human players before auto-draw
+            if (isHumanTurn && !(game as any).turnGraceStartedAt) {
+              (game as any).turnGraceStartedAt = Date.now();
+            }
+          }
 
           broadcastToRoom(game.roomId, {
             type: 'TIMER_TICK',
@@ -929,8 +1160,12 @@ export function setupWebSocketServer(server: http.Server) {
             currentTurnIndex: game.currentTurnIndex,
           });
 
-          if (game.turnTimeRemaining <= 0) {
-            const player = game.players[game.currentTurnIndex];
+          const now = Date.now();
+          const graceElapsed = (game as any).turnGraceStartedAt ? now - (game as any).turnGraceStartedAt : 0;
+          const shouldTriggerAutoForfeit = game.turnTimeRemaining <= 0 && (!isHumanTurn || graceElapsed >= 1500);
+
+          if (shouldTriggerAutoForfeit) {
+            (game as any).turnGraceStartedAt = undefined;
             if (player && !player.isEliminated) {
               if (!player.isBot) {
                 player.missedTurns = (player.missedTurns || 0) + 1;

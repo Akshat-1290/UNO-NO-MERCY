@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { ChatMessage, GameEventLog } from '../../../shared/src/types';
+import { ChatMessage, GameEventLog } from '@uno/shared/types';
 import {
   Send,
   MessageSquare,

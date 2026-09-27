@@ -17,10 +17,9 @@ import {
   Skull,
   Radio,
 } from 'lucide-react';
-import { LobbyRules, UserProfile } from '../../../shared/src/types';
+import { LobbyRules, UserProfile } from '@uno/shared/types';
 import { API_BASE_URL } from '../config/api';
-
-interface LobbySummary {
+export interface LobbySummary {
   roomId: string;
   roomName: string;
   playerCount: number;
@@ -30,7 +29,8 @@ interface LobbySummary {
 
 interface LobbyListProps {
   profile: UserProfile;
-  onCreateLobby: (roomName: string, isPrivate: boolean) => void;
+  wsLobbies?: LobbySummary[] | null;
+  onCreateLobby: (roomName: string, isPrivate: boolean, maxPlayers: number) => void;
   onJoinLobby: (roomId: string) => void;
   onQuickPlayBots: () => void;
   onOpenProfile: () => void;
@@ -49,6 +49,7 @@ interface LobbyListProps {
 
 export const LobbyList: React.FC<LobbyListProps> = ({
   profile,
+  wsLobbies,
   onCreateLobby,
   onJoinLobby,
   onQuickPlayBots,
@@ -67,6 +68,7 @@ export const LobbyList: React.FC<LobbyListProps> = ({
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [newRoomName, setNewRoomName] = useState(`${profile.name}'s Mercy Arena`);
   const [isPrivate, setIsPrivate] = useState(false);
+  const [maxPlayers, setMaxPlayers] = useState<number>(4);
 
   const copyRoomId = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
@@ -75,30 +77,35 @@ export const LobbyList: React.FC<LobbyListProps> = ({
     setTimeout(() => setCopiedRoomId(null), 2000);
   };
 
-  const fetchLobbies = () => {
-    setIsRefreshing(true);
+  const fetchLobbies = (showSpinner = true) => {
+    if (showSpinner) setIsRefreshing(true);
     fetch(`${API_BASE_URL}/api/lobbies`)
       .then((res) => res.json())
       .then((data) => {
         setLobbies(data);
         setLoading(false);
-        setIsRefreshing(false);
+        if (showSpinner) setIsRefreshing(false);
       })
       .catch(() => {
         setLoading(false);
-        setIsRefreshing(false);
+        if (showSpinner) setIsRefreshing(false);
       });
   };
 
   useEffect(() => {
-    fetchLobbies();
-    const interval = setInterval(fetchLobbies, 4000);
-    return () => clearInterval(interval);
+    fetchLobbies(false);
   }, []);
+
+  useEffect(() => {
+    if (wsLobbies) {
+      setLobbies(wsLobbies);
+      setLoading(false);
+    }
+  }, [wsLobbies]);
 
   const handleCreate = (e: React.FormEvent) => {
     e.preventDefault();
-    onCreateLobby(newRoomName.trim() || `${profile.name}'s Mercy Arena`, isPrivate);
+    onCreateLobby(newRoomName.trim() || `${profile.name}'s Mercy Arena`, isPrivate, maxPlayers);
     setCreateModalOpen(false);
   };
 
@@ -373,7 +380,7 @@ export const LobbyList: React.FC<LobbyListProps> = ({
 
           <button
             type="button"
-            onClick={fetchLobbies}
+            onClick={() => fetchLobbies(true)}
             className="btn-stamp-secondary clip-chamfer-btn px-3 py-1.5 bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-xs font-mono-hud font-bold text-neutral-300 hover:text-white transition-colors cursor-pointer flex items-center gap-1.5"
           >
             <RefreshCw className={`w-3 h-3 ${isRefreshing ? 'animate-spin' : ''}`} />
@@ -494,6 +501,37 @@ export const LobbyList: React.FC<LobbyListProps> = ({
                   onChange={(e) => setNewRoomName(e.target.value)}
                   className="w-full bg-[#16141a] border border-neutral-700 px-3.5 py-2.5 text-xs font-mono-hud text-white focus:outline-none focus:border-red-500 clip-chamfer-btn"
                 />
+              </div>
+
+              {/* Player Limit Defining Function */}
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block font-mono-hud text-[11px] text-neutral-400 font-bold uppercase">
+                    Player Limit
+                  </label>
+                  <span className="font-mono-hud text-xs text-amber-400 font-black">
+                    {maxPlayers} Contenders Max
+                  </span>
+                </div>
+                <div className="grid grid-cols-7 gap-1.5">
+                  {[2, 3, 4, 5, 6, 7, 8].map((num) => (
+                    <button
+                      key={num}
+                      type="button"
+                      onClick={() => setMaxPlayers(num)}
+                      className={`py-2 text-xs font-mono-hud font-black uppercase clip-chamfer-btn border transition-all cursor-pointer ${
+                        maxPlayers === num
+                          ? 'bg-red-600 border-amber-400 text-white shadow-[2px_2px_0px_#000]'
+                          : 'bg-[#16141a] border-neutral-700 text-neutral-400 hover:text-white hover:border-neutral-500'
+                      }`}
+                    >
+                      {num}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] font-mono-hud text-neutral-500 mt-1">
+                  Select arena capacity (2 to 8 players). Only this amount can enter the lobby.
+                </p>
               </div>
 
               <div className="flex items-center justify-between p-3.5 bg-[#141218] border border-neutral-800 clip-chamfer">

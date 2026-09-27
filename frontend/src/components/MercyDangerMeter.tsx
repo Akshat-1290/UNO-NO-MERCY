@@ -1,5 +1,5 @@
 import React from 'react';
-import { Player, BotPersonality } from '../../../shared/src/types';
+import { Player, BotPersonality } from '@uno/shared/types';
 import { Skull, AlertTriangle, Flame, ShieldAlert, Zap, Compass, Bot } from 'lucide-react';
 
 interface MercyDangerMeterProps {
@@ -163,21 +163,6 @@ export const MercyDangerMeter: React.FC<MercyDangerMeterProps> = ({
           </div>
         )}
       </div>
-
-      {/* Critical KO Danger Label */}
-      {isCritical && (
-        <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded-full bg-red-600 border border-red-400 text-white font-black text-[9px] uppercase tracking-wider flex items-center gap-0.5 shadow-md shadow-red-950/80 whitespace-nowrap z-20">
-          <AlertTriangle className="w-2.5 h-2.5 text-amber-300" />
-          <span>{cardsRemaining <= 2 ? '1 HIT KO!' : `DANGER ${cardCount}/${mercyLimit}`}</span>
-        </div>
-      )}
-
-      {/* Warning Alert Label */}
-      {isWarning && !isCritical && (
-        <div className="absolute -top-2.5 left-1/2 -translate-x-1/2 px-1.5 py-0.2 rounded-full bg-amber-500/90 border border-amber-400 text-neutral-950 font-black text-[8px] uppercase tracking-wider whitespace-nowrap z-20">
-          <span>{cardCount}/{mercyLimit}</span>
-        </div>
-      )}
     </div>
   );
 };

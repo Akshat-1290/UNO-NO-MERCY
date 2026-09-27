@@ -65,6 +65,15 @@ export interface EliminationHighlight {
   timestamp: number;
 }
 
+export interface RouletteDrawEvent {
+  id: string;
+  victimId: string;
+  victimName: string;
+  targetColor: CardColor;
+  cards: Card[];
+  timestamp: number;
+}
+
 export interface MatchAward {
   title: string;
   badge: string;
@@ -114,6 +123,8 @@ export interface GameState {
   roomId: string;
   roomName: string;
   isPrivate: boolean;
+  maxPlayers?: number;
+  isBotOnly?: boolean;
   status: 'waiting' | 'playing' | 'ended' | 'paused';
   pauseReason?: string;
   rules: LobbyRules;
@@ -133,6 +144,7 @@ export interface GameState {
   startedAt?: number;
   endedAt?: number;
   lastElimination?: EliminationHighlight;
+  lastRouletteDraw?: RouletteDrawEvent;
   awards?: MatchAward[];
   activeTaunts?: TableTaunt[];
 }

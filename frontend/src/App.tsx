@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
 import {
   GameState,
   LobbyRules,
@@ -8,16 +8,30 @@ import {
   ChatMessage,
   BotPersonality,
   TableTaunt,
-} from '../../shared/src/types';
-import { LobbyList } from './components/LobbyList';
-import { LobbyRoom } from './components/LobbyRoom';
-import { GameBoard } from './components/GameBoard';
-import { RulebookModal } from './components/RulebookModal';
-import { ProfileModal } from './components/ProfileModal';
-import { HandbookModal } from './components/HandbookModal';
+} from '@uno/shared/types';
+import { LobbyList, LobbySummary } from './components/LobbyList';
 import { MinimalPerfMonitor } from './components/MinimalPerfMonitor';
-import { perfEngine } from './utils/perfTracker';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { perfEngine, IS_PERF_TRACKER_ENABLED } from './utils/perfTracker';
 import { timerSync } from './utils/timerSync';
+import { WS_BASE_URL, API_BASE_URL } from './config/api';
+
+
+const LobbyRoom = lazy(() =>
+  import('./components/LobbyRoom').then((m) => ({ default: m.LobbyRoom }))
+);
+const GameBoard = lazy(() =>
+  import('./components/GameBoard').then((m) => ({ default: m.GameBoard }))
+);
+const RulebookModal = lazy(() =>
+  import('./components/RulebookModal').then((m) => ({ default: m.RulebookModal }))
+);
+const ProfileModal = lazy(() =>
+  import('./components/ProfileModal').then((m) => ({ default: m.ProfileModal }))
+);
+const HandbookModal = lazy(() =>
+  import('./components/HandbookModal').then((m) => ({ default: m.HandbookModal }))
+);
 import {
   Flame,
   BookOpen,
@@ -29,7 +43,6 @@ import {
   WifiOff,
   AlertTriangle,
 } from 'lucide-react';
-import { WS_BASE_URL, API_BASE_URL } from './config/api';
 
 const DEFAULT_PROFILE: UserProfile = {
   id: `user_${Math.random().toString(36).substring(2, 9)}`,
@@ -62,7 +75,14 @@ export default function App() {
     let userPref = DEFAULT_PROFILE;
     if (saved) {
       try {
-        userPref = JSON.parse(saved);
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed === 'object') {
+          userPref = {
+            ...DEFAULT_PROFILE,
+            ...parsed,
+            name: parsed.name && parsed.name !== 'Player' ? parsed.name : DEFAULT_PROFILE.name,
+          };
+        }
       } catch {
         userPref = DEFAULT_PROFILE;
       }
@@ -86,6 +106,7 @@ export default function App() {
     playerCount?: number;
     pauseReason?: string;
   } | null>(null);
+  const [publicLobbies, setPublicLobbies] = useState<LobbySummary[] | null>(null);
 
   // Modals
   const [isRulesOpen, setIsRulesOpen] = useState(false);
@@ -96,6 +117,11 @@ export default function App() {
   const wsRef = useRef<WebSocket | null>(null);
   const gameStateRef = useRef<GameState | null>(gameState);
   const isLeavingRef = useRef<boolean>(false);
+  const profileRef = useRef<UserProfile>(profile);
+
+  useEffect(() => {
+    profileRef.current = profile;
+  }, [profile]);
 
   useEffect(() => {
     gameStateRef.current = gameState;
@@ -107,20 +133,65 @@ export default function App() {
     }
   }, [gameState]);
 
-  // Sync profile changes to localStorage & backend
-  const updateProfile = (updated: Partial<UserProfile>) => {
-    const newProfile = { ...profile, ...updated };
-    setProfile(newProfile);
-    localStorage.setItem('uno_no_mercy_user', JSON.stringify(newProfile));
-    fetch(`${API_BASE_URL}/api/profile/${newProfile.id}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newProfile),
-    }).catch(() => {});
-  };
+  const showToast = useCallback((text: string) => {
+    setErrorToast(text);
+    setTimeout(() => setErrorToast(null), 4000);
+  }, []);
 
-  const checkActiveMatch = () => {
-    fetch(`/api/active-match/${profile.id}`)
+  const sendWs = useCallback((msg: unknown) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      const payload = typeof msg === 'object' && msg !== null
+        ? {
+            ...(msg as Record<string, unknown>),
+            userId: (msg as Record<string, unknown>).userId || profileRef.current.id,
+            roomId: (msg as Record<string, unknown>).roomId || gameStateRef.current?.roomId,
+          }
+        : msg;
+      wsRef.current.send(JSON.stringify(payload));
+    } else {
+      showToast('Connection re-establishing, please try again.');
+    }
+  }, [showToast]);
+
+  // Sync profile changes to localStorage & backend
+  const updateProfile = useCallback((updated: Partial<UserProfile>) => {
+    setProfile((prev) => {
+      const newProfile = { ...prev, ...updated };
+      localStorage.setItem('uno_no_mercy_user', JSON.stringify(newProfile));
+      profileRef.current = newProfile;
+
+      fetch(`${API_BASE_URL}/api/profile/${newProfile.id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newProfile),
+      }).catch(() => {});
+
+      sendWs({
+        type: 'SYNC_PROFILE',
+        profile: newProfile,
+      });
+
+      return newProfile;
+    });
+
+    // Update in-place in active game state if player is currently in a room
+    setGameState((prev) => {
+      if (!prev) return prev;
+      const updatedPlayers = prev.players.map((p) =>
+        p.id === profileRef.current.id
+          ? { ...p, name: updated.name || p.name, avatar: updated.avatar || p.avatar }
+          : p
+      );
+      return {
+        ...prev,
+        players: updatedPlayers,
+      };
+    });
+  }, [sendWs]);
+
+  const checkActiveMatch = useCallback(() => {
+    const pId = profileRef.current.id;
+    fetch(`/api/active-match/${pId}`)
       .then((res) => res.json())
       .then((data) => {
         if (data.active) {
@@ -130,22 +201,54 @@ export default function App() {
         }
       })
       .catch(() => {});
-  };
+  }, []);
 
   const syncProfile = useCallback(() => {
-    fetch(`${API_BASE_URL}/api/profile/${profile.id}`)
+    const curP = profileRef.current;
+    fetch(`${API_BASE_URL}/api/profile/${curP.id}`)
       .then((res) => res.json())
       .then((data) => {
-        if (data && data.id) {
+        if (data && data.notFound) {
+          // Server restarted or no in-memory record, push current local profile to server
+          fetch(`${API_BASE_URL}/api/profile/${curP.id}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(curP),
+          }).catch(() => {});
+        } else if (data && data.id) {
           setProfile((prev) => {
-            const merged = { ...prev, ...data };
+            const safeName = prev.name && prev.name !== 'Player' ? prev.name : data.name || prev.name;
+            const safeAvatar = prev.avatar || data.avatar || '🔥';
+            const safeTitle = prev.title || data.title || 'Mercy Contender';
+
+            if (
+              prev.gamesPlayed === data.gamesPlayed &&
+              prev.wins === data.wins &&
+              prev.mercyEliminationsDealt === data.mercyEliminationsDealt &&
+              prev.mercyEliminationsSuffered === data.mercyEliminationsSuffered &&
+              prev.unoCalls === data.unoCalls &&
+              prev.highestCardCount === data.highestCardCount &&
+              prev.highestStackSurvived === data.highestStackSurvived &&
+              prev.name === safeName &&
+              prev.avatar === safeAvatar
+            ) {
+              return prev;
+            }
+
+            const merged: UserProfile = {
+              ...prev,
+              ...data,
+              name: safeName,
+              avatar: safeAvatar,
+              title: safeTitle,
+            };
             localStorage.setItem('uno_no_mercy_user', JSON.stringify(merged));
             return merged;
           });
         }
       })
       .catch(() => {});
-  }, [profile.id]);
+  }, []);
 
   useEffect(() => {
     syncProfile();
@@ -154,11 +257,28 @@ export default function App() {
   useEffect(() => {
     if (!gameState) {
       checkActiveMatch();
-      syncProfile();
-      const interval = setInterval(checkActiveMatch, 3000);
+
+      const handleVisibility = () => {
+        if (document.visibilityState === 'visible' && !gameStateRef.current) {
+          checkActiveMatch();
+        }
+      };
+      document.addEventListener('visibilitychange', handleVisibility);
+      return () => document.removeEventListener('visibilitychange', handleVisibility);
+    }
+  }, [gameState, checkActiveMatch]);
+
+  // Gentle fallback check ONLY when an active match banner is currently displayed
+  useEffect(() => {
+    if (!gameState && activeMatch?.active) {
+      const interval = setInterval(() => {
+        if (document.visibilityState === 'visible') {
+          checkActiveMatch();
+        }
+      }, 12000);
       return () => clearInterval(interval);
     }
-  }, [gameState, profile.id, syncProfile]);
+  }, [gameState, activeMatch?.active, checkActiveMatch]);
 
   // Keep perfEngine informed of gameplay state to avoid measuring false drops when in lobby
   useEffect(() => {
@@ -168,8 +288,7 @@ export default function App() {
 
   // Connect WebSocket
   useEffect(() => {
-
-const wsUrl = WS_BASE_URL;
+    const wsUrl = WS_BASE_URL;
     let reconnectTimeout: ReturnType<typeof setTimeout>;
 
     const connect = () => {
@@ -183,6 +302,14 @@ const wsUrl = WS_BASE_URL;
             socket.send(JSON.stringify(msg));
           }
         });
+
+        // Always sync user profile to backend upon connection
+        socket.send(
+          JSON.stringify({
+            type: 'SYNC_PROFILE',
+            profile,
+          })
+        );
 
         // Check if user opened a shared lobby link e.g. /?room=MERCY-1234
         const urlParams = new URLSearchParams(window.location.search);
@@ -299,6 +426,16 @@ const wsUrl = WS_BASE_URL;
               setChatMessages([]);
               checkActiveMatch();
               break;
+            case 'KICKED_FROM_ROOM':
+              isLeavingRef.current = true;
+              localStorage.removeItem('uno_current_room');
+              gameStateRef.current = null;
+              setGameState(null);
+              setActiveMatch(null);
+              setChatMessages([]);
+              showToast(data.message || 'You have been removed from the lobby by the host.');
+              checkActiveMatch();
+              break;
             case 'LOBBY_CANCELLED':
               isLeavingRef.current = true;
               localStorage.removeItem('uno_current_room');
@@ -317,6 +454,14 @@ const wsUrl = WS_BASE_URL;
               break;
             case 'PONG':
               perfEngine.handlePong(data.clientTimestamp);
+              break;
+            case 'LOBBIES_UPDATED':
+              if (Array.isArray(data.lobbies)) {
+                setPublicLobbies(data.lobbies);
+              }
+              break;
+            case 'ACTIVE_MATCH_STATUS':
+              setActiveMatch(data.activeMatch || null);
               break;
             case 'PROFILE_UPDATED':
               if (data.profile) {
@@ -378,28 +523,8 @@ const wsUrl = WS_BASE_URL;
     };
   }, []);
 
-  const sendWs = (msg: unknown) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      const payload = typeof msg === 'object' && msg !== null
-        ? {
-            ...(msg as Record<string, unknown>),
-            userId: (msg as Record<string, unknown>).userId || profile.id,
-            roomId: (msg as Record<string, unknown>).roomId || gameStateRef.current?.roomId,
-          }
-        : msg;
-      wsRef.current.send(JSON.stringify(payload));
-    } else {
-      showToast('Connection re-establishing, please try again.');
-    }
-  };
-
-  const showToast = (text: string) => {
-    setErrorToast(text);
-    setTimeout(() => setErrorToast(null), 4000);
-  };
-
   // Lobby & Game Actions
-  const handleCreateLobby = useCallback((roomName: string, isPrivate: boolean) => {
+  const handleCreateLobby = useCallback((roomName: string, isPrivate: boolean, maxPlayers: number = 8) => {
     isLeavingRef.current = false;
     perfEngine.resetStats();
     const roomId = `MERCY-${Math.floor(1000 + Math.random() * 9000)}`;
@@ -412,6 +537,7 @@ const wsUrl = WS_BASE_URL;
       avatar: profile.avatar,
       userId: profile.id,
       isPrivate,
+      maxPlayers,
     });
   }, [profile]);
 
@@ -446,9 +572,11 @@ const wsUrl = WS_BASE_URL;
       avatar: profile.avatar,
       userId: profile.id,
       isPrivate: true,
+      maxPlayers: 4,
+      isBotOnly: true,
     });
 
-    // Auto add 3 bots after room creation
+    // Auto add 3 bots after room creation (default 4 slots: 1 player and 3 bots, no more)
     setTimeout(() => {
       sendWs({ type: 'ADD_BOT' });
       setTimeout(() => sendWs({ type: 'ADD_BOT' }), 100);
@@ -482,8 +610,52 @@ const wsUrl = WS_BASE_URL;
   }, []);
 
   const handlePlayCard = useCallback((card: Card, chosenColor?: CardColor, targetPlayerId?: string) => {
+    // Optimistic instantaneous state update for zero-delay visual responsiveness
+    setGameState((prev) => {
+      if (!prev || prev.status !== 'playing') return prev;
+      const meIdx = prev.players.findIndex((p) => p.id === profile.id);
+      if (meIdx === -1) return prev;
+
+      const player = prev.players[meIdx];
+      const cardIdx = player.cards.findIndex((c) => c.id === card.id || (c.color === card.color && c.value === card.value));
+      if (cardIdx === -1) return prev;
+
+      const updatedCards = [...player.cards];
+      const [playedCard] = updatedCards.splice(cardIdx, 1);
+      const finalCard: Card = {
+        ...playedCard,
+        chosenColor: chosenColor || playedCard.chosenColor,
+      };
+
+      const updatedPlayers = [...prev.players];
+      updatedPlayers[meIdx] = {
+        ...player,
+        cards: updatedCards,
+      };
+
+      const penaltyMap: Record<string, number> = {
+        draw2: 2,
+        draw4: 4,
+        wild_reverse_draw4: 4,
+        wild_draw6: 6,
+        wild_draw10: 10,
+      };
+      const penalty = penaltyMap[finalCard.value] || 0;
+      const newPenalty = penalty > 0 ? prev.activePenalty + penalty : prev.activePenalty;
+      const isWild = finalCard.color === 'wild' || finalCard.value.startsWith('wild_');
+
+      return {
+        ...prev,
+        discardPile: [...prev.discardPile, finalCard],
+        currentColor: isWild && chosenColor ? chosenColor : finalCard.color !== 'wild' ? finalCard.color : prev.currentColor,
+        activePenalty: newPenalty,
+        lastPenaltyCard: penalty > 0 ? finalCard : prev.lastPenaltyCard,
+        players: updatedPlayers,
+      };
+    });
+
     sendWs({ type: 'PLAY_CARD', card, chosenColor, targetPlayerId });
-  }, []);
+  }, [profile.id, sendWs]);
 
   const handleDrawCard = useCallback(() => {
     sendWs({ type: 'DRAW_CARD' });
@@ -573,7 +745,8 @@ const wsUrl = WS_BASE_URL;
   const isInActiveGame = gameState && (gameState.status === 'playing' || gameState.status === 'ended');
 
   return (
-    <div className={`${isInActiveGame ? 'h-screen max-h-screen overflow-hidden bg-neutral-950' : 'min-h-screen bg-ash-asphalt'} flex flex-col text-neutral-100 font-sans selection:bg-rose-500 selection:text-white`}>
+    <ErrorBoundary>
+      <div className={`${isInActiveGame ? 'h-screen max-h-screen overflow-hidden bg-neutral-950' : 'min-h-screen bg-ash-asphalt'} flex flex-col text-neutral-100 font-sans selection:bg-rose-500 selection:text-white`}>
       {/* Toast Alert */}
       {errorToast && (
         <div className="fixed top-4 inset-x-0 z-50 flex justify-center px-4 pointer-events-none animate-fadeIn">
@@ -624,15 +797,15 @@ const wsUrl = WS_BASE_URL;
           </div>
 
           {/* Right Navigation Controls */}
-          <div className="flex items-center space-x-2 shrink-0 font-mono-hud text-xs">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 font-mono-hud text-xs">
             {/* Mattel Rulebook */}
             <button
               type="button"
               onClick={() => setIsRulesOpen(true)}
-              className="btn-stamp-secondary clip-chamfer-btn flex items-center space-x-1.5 px-2.5 py-1.5 sm:px-3 sm:py-1.5 bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-300 transition-colors cursor-pointer"
+              className="btn-stamp-secondary clip-chamfer-btn inline-flex items-center justify-center gap-1.5 w-8 h-8 sm:w-auto sm:h-9 sm:px-3 bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-300 transition-colors cursor-pointer leading-none"
               title="Official Rulebook"
             >
-              <BookOpen className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+              <BookOpen className="w-4 h-4 sm:w-3.5 sm:h-3.5 text-rose-400 shrink-0" />
               <span className="hidden sm:inline font-bold">Rules</span>
             </button>
 
@@ -640,22 +813,22 @@ const wsUrl = WS_BASE_URL;
             <button
               type="button"
               onClick={() => setIsRefereeOpen(true)}
-              className="btn-stamp-secondary clip-chamfer-btn flex items-center space-x-1.5 px-2.5 py-1.5 sm:px-3 sm:py-1.5 bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-amber-300 hover:text-amber-200 transition-all cursor-pointer"
+              className="btn-stamp-secondary clip-chamfer-btn inline-flex items-center justify-center gap-1 sm:gap-1.5 h-8 px-2.5 sm:h-9 sm:px-3 bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-amber-300 hover:text-amber-200 transition-all cursor-pointer leading-none"
               title="AI Referee & Handbook"
             >
               <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0" />
               <span className="hidden sm:inline font-bold">Handbook</span>
-              <span className="sm:hidden text-[10px] font-bold">AI</span>
+              <span className="sm:hidden text-[10px] font-bold leading-none">AI</span>
             </button>
 
             {/* Profile & History */}
             <button
               type="button"
               onClick={() => setIsProfileOpen(true)}
-              className="btn-stamp-secondary clip-chamfer-btn flex items-center space-x-2 px-2.5 py-1.5 sm:px-3 sm:py-1.5 bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-white transition-colors cursor-pointer"
+              className="btn-stamp-secondary clip-chamfer-btn inline-flex items-center justify-center gap-2 w-8 h-8 sm:w-auto sm:h-9 sm:px-3 bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-white transition-colors cursor-pointer leading-none"
               title="Player Profile"
             >
-              <span className="text-sm leading-none">{profile.avatar}</span>
+              <span className="text-sm leading-none flex items-center justify-center">{profile.avatar}</span>
               <span className="hidden sm:inline font-bold truncate max-w-[80px]">{profile.name}</span>
             </button>
 
@@ -664,10 +837,10 @@ const wsUrl = WS_BASE_URL;
               <button
                 type="button"
                 onClick={handleLeaveGame}
-                className="btn-stamp-secondary clip-chamfer-btn p-1.5 sm:p-2 bg-neutral-900 hover:bg-red-950 border border-neutral-700 text-neutral-400 hover:text-red-300 transition-colors cursor-pointer"
+                className="btn-stamp-secondary clip-chamfer-btn inline-flex items-center justify-center w-8 h-8 sm:w-9 sm:h-9 bg-neutral-900 hover:bg-red-950 border border-neutral-700 text-neutral-400 hover:text-red-300 transition-colors cursor-pointer leading-none"
                 title="Leave Room"
               >
-                <LogOut className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                <LogOut className="w-4 h-4 shrink-0" />
               </button>
             )}
           </div>
@@ -676,75 +849,96 @@ const wsUrl = WS_BASE_URL;
 
       {/* Main App Stage */}
       <main className={isInActiveGame ? 'h-full flex-1 overflow-hidden' : 'flex-1'}>
-        {!gameState ? (
-          /* Lobby Browser & Landing Screen */
-          <LobbyList
-            profile={profile}
-            onCreateLobby={handleCreateLobby}
-            onJoinLobby={handleJoinLobby}
-            onQuickPlayBots={handleQuickPlayBots}
-            onOpenProfile={() => setIsProfileOpen(true)}
-            onOpenRules={() => setIsRulesOpen(true)}
-            onOpenReferee={() => setIsRefereeOpen(true)}
-            activeMatch={activeMatch}
-            onRejoinMatch={handleRejoinMatch}
-            onAbandonMatch={handleAbandonMatch}
-          />
-        ) : gameState.status === 'waiting' ? (
-          /* Pre-Game Lobby Configuration Room */
-          <LobbyRoom
-            gameState={gameState}
-            currentUserId={profile.id}
-            onUpdateRules={handleUpdateRules}
-            onAddBot={handleAddBot}
-            onRemovePlayer={handleRemovePlayer}
-            onToggleReady={handleToggleReady}
-            onStartGame={handleStartGame}
-            onSendMessage={handleSendMessage}
-            chatMessages={chatMessages}
-            onOpenRulesModal={() => setIsRulesOpen(true)}
-            onLeaveLobby={handleLeaveGame}
-            onCancelLobby={handleCancelLobby}
-          />
-        ) : (
-          /* Active Playing Game Arena */
-          <GameBoard
-            gameState={gameState}
-            currentUserId={profile.id}
-            onPlayCard={handlePlayCard}
-            onDrawCard={handleDrawCard}
-            onCallUno={handleCallUno}
-            onCatchUno={handleCatchUno}
-            onSendMessage={handleSendMessage}
-            onSendTaunt={handleSendTaunt}
-            chatMessages={chatMessages}
-            onOpenRules={() => setIsRulesOpen(true)}
-            onOpenReferee={() => setIsRefereeOpen(true)}
-            onRestartGame={handleRestartGame}
-            onLeaveGame={handleLeaveGame}
-            onReturnToLobby={handleReturnToLobby}
-            onResumeControl={handleResumeControl}
-          />
-        )}
+        <Suspense
+          fallback={
+            <div className="flex flex-col items-center justify-center h-[70vh] gap-3 font-mono-hud">
+              <div className="w-10 h-10 border-2 border-red-500 border-t-transparent rounded-full animate-spin" />
+              <span className="text-xs font-bold uppercase tracking-widest text-neutral-400">
+                Loading Arena Module...
+              </span>
+            </div>
+          }
+        >
+          {!gameState ? (
+            /* Lobby Browser & Landing Screen */
+            <LobbyList
+              profile={profile}
+              wsLobbies={publicLobbies}
+              onCreateLobby={handleCreateLobby}
+              onJoinLobby={handleJoinLobby}
+              onQuickPlayBots={handleQuickPlayBots}
+              onOpenProfile={() => setIsProfileOpen(true)}
+              onOpenRules={() => setIsRulesOpen(true)}
+              onOpenReferee={() => setIsRefereeOpen(true)}
+              activeMatch={activeMatch}
+              onRejoinMatch={handleRejoinMatch}
+              onAbandonMatch={handleAbandonMatch}
+            />
+          ) : gameState.status === 'waiting' ? (
+            /* Pre-Game Lobby Configuration Room */
+            <LobbyRoom
+              gameState={gameState}
+              currentUserId={profile.id}
+              onUpdateRules={handleUpdateRules}
+              onAddBot={handleAddBot}
+              onRemovePlayer={handleRemovePlayer}
+              onToggleReady={handleToggleReady}
+              onStartGame={handleStartGame}
+              onSendMessage={handleSendMessage}
+              chatMessages={chatMessages}
+              onOpenRulesModal={() => setIsRulesOpen(true)}
+              onLeaveLobby={handleLeaveGame}
+              onCancelLobby={handleCancelLobby}
+            />
+          ) : (
+            /* Active Playing Game Arena */
+            <GameBoard
+              gameState={gameState}
+              currentUserId={profile.id}
+              onPlayCard={handlePlayCard}
+              onDrawCard={handleDrawCard}
+              onCallUno={handleCallUno}
+              onCatchUno={handleCatchUno}
+              onSendMessage={handleSendMessage}
+              onSendTaunt={handleSendTaunt}
+              chatMessages={chatMessages}
+              onOpenRules={() => setIsRulesOpen(true)}
+              onOpenReferee={() => setIsRefereeOpen(true)}
+              onRestartGame={handleRestartGame}
+              onLeaveGame={handleLeaveGame}
+              onReturnToLobby={handleReturnToLobby}
+              onResumeControl={handleResumeControl}
+            />
+          )}
+        </Suspense>
       </main>
 
-      {/* Modals */}
-      <RulebookModal isOpen={isRulesOpen} onClose={() => setIsRulesOpen(false)} />
-      <ProfileModal
-        isOpen={isProfileOpen}
-        onClose={() => setIsProfileOpen(false)}
-        profile={profile}
-        onUpdateProfile={updateProfile}
-      />
-      <HandbookModal
-        isOpen={isRefereeOpen}
-        onClose={() => setIsRefereeOpen(false)}
-        gameState={gameState}
-        myCards={gameState?.players.find((p) => p.id === profile.id)?.cards}
-      />
+      {/* Lazy-Loaded Modals */}
+      <Suspense fallback={null}>
+        {isRulesOpen && (
+          <RulebookModal isOpen={isRulesOpen} onClose={() => setIsRulesOpen(false)} />
+        )}
+        {isProfileOpen && (
+          <ProfileModal
+            isOpen={isProfileOpen}
+            onClose={() => setIsProfileOpen(false)}
+            profile={profile}
+            onUpdateProfile={updateProfile}
+          />
+        )}
+        {isRefereeOpen && (
+          <HandbookModal
+            isOpen={isRefereeOpen}
+            onClose={() => setIsRefereeOpen(false)}
+            gameState={gameState}
+            myCards={gameState?.players.find((p) => p.id === profile.id)?.cards}
+          />
+        )}
+      </Suspense>
 
-      {/* Lightweight Direct-DOM Telemetry HUD (Zero React Re-renders, Zero Graphs) */}
-      <MinimalPerfMonitor />
-    </div>
+        {/* Lightweight Direct-DOM Telemetry HUD (Controlled via VITE_ENABLE_PERF_TRACKER env var) */}
+        {IS_PERF_TRACKER_ENABLED && <MinimalPerfMonitor />}
+      </div>
+    </ErrorBoundary>
   );
 }

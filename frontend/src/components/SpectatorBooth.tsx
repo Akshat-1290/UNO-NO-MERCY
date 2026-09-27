@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { GameState } from '../../../shared/src/types';
+import { GameState } from '@uno/shared/types';
 import { Video, Award, Sparkles } from 'lucide-react';
 
 interface SpectatorBoothProps {

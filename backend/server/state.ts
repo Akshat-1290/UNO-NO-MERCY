@@ -9,7 +9,7 @@ import {
   GameEventLog,
   TableTaunt,
   MatchAward,
-} from '../../frontend/src/types';
+} from '@uno/shared/types';
 import { LiveMatchStats, ClientSocketInfo } from './types';
 
 // In-Memory Storage for Lobbies, Profiles, and Match History
@@ -135,21 +135,35 @@ export function broadcastLog(game: GameState, text: string, type: GameEventLog['
   broadcastToRoom(game.roomId, { type: 'GAME_LOG', log: logEntry });
 }
 
+// Pre-allocated frozen masked card pool: prevents card ID tracking across 7/0 swaps and eliminates GC allocations on broadcast
+const MASKED_CARD_POOL: Card[] = Array.from({ length: 64 }, (_, idx) =>
+  Object.freeze({
+    id: `m_${idx}`,
+    color: 'wild' as const,
+    value: 'wild' as const,
+  })
+);
+
+function getMaskedCards(count: number): Card[] {
+  if (count <= 0) return [];
+  if (count <= MASKED_CARD_POOL.length) {
+    return MASKED_CARD_POOL.slice(0, count);
+  }
+  return Array.from({ length: count }, (_, idx) => ({
+    id: `m_${idx}`,
+    color: 'wild',
+    value: 'wild',
+  }));
+}
+
 export function getSanitizedGameState(game: GameState, forPlayerId?: string): GameState {
   return {
     ...game,
-    discardPile: game.discardPile.length > 5 ? game.discardPile.slice(-5) : game.discardPile,
-    logs: game.logs.length > 15 ? game.logs.slice(-15) : game.logs,
+    discardPile: game.discardPile.length > 3 ? game.discardPile.slice(-3) : game.discardPile,
+    logs: game.logs.length > 12 ? game.logs.slice(-12) : game.logs,
     players: game.players.map((p) => ({
       ...p,
-      cards:
-        p.id === forPlayerId
-          ? p.cards
-          : p.cards.map((c) => ({
-              id: c.id,
-              color: 'wild',
-              value: 'wild',
-            })),
+      cards: p.id === forPlayerId ? p.cards : getMaskedCards(p.cards.length),
     })),
   };
 }
@@ -356,6 +370,8 @@ export function recordMatchFinish(game: GameState, winner: Player) {
       history.unshift(record);
       if (history.length > 50) history.pop();
       matchHistories.set(p.id, history);
+
+      sendActiveMatchStatus(p.id);
     }
   });
 }
@@ -371,3 +387,64 @@ export function countConnectedHumanPlayers(game: GameState): number {
   });
   return count;
 }
+
+export function getPublicLobbies() {
+  return Array.from(games.values())
+    .filter((g) => !g.isPrivate && g.status === 'waiting' && !g.isBotOnly)
+    .map((g) => ({
+      roomId: g.roomId,
+      roomName: g.roomName,
+      playerCount: g.players.length,
+      maxPlayers: g.maxPlayers || 8,
+      rules: g.rules,
+    }));
+}
+
+export function broadcastLobbyListUpdate() {
+  const payload = JSON.stringify({
+    type: 'LOBBIES_UPDATED',
+    lobbies: getPublicLobbies(),
+  });
+  socketClients.forEach((client, ws) => {
+    if (!client.roomId && ws.readyState === WebSocket.OPEN) {
+      ws.send(payload);
+    }
+  });
+}
+
+export function getActiveMatchForUser(userId: string) {
+  if (!userId) return { active: false };
+  const match = Array.from(games.values()).find(
+    (g) =>
+      (g.status === 'playing' || g.status === 'paused') &&
+      g.players.some((p) => p.id === userId && !p.isEliminated) &&
+      g.players.some((p) => !p.isBot && p.id !== userId)
+  );
+
+  if (match) {
+    return {
+      active: true,
+      roomId: match.roomId,
+      roomName: match.roomName,
+      status: match.status,
+      playerCount: match.players.length,
+      pauseReason: match.pauseReason,
+    };
+  }
+  return { active: false };
+}
+
+export function sendActiveMatchStatus(userId: string) {
+  if (!userId) return;
+  const status = getActiveMatchForUser(userId);
+  const payload = JSON.stringify({
+    type: 'ACTIVE_MATCH_STATUS',
+    activeMatch: status.active ? status : null,
+  });
+  socketClients.forEach((client, ws) => {
+    if (client.playerId === userId && ws.readyState === WebSocket.OPEN) {
+      ws.send(payload);
+    }
+  });
+}
+
